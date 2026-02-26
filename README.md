@@ -2,11 +2,11 @@
 
 ### Brasilseg – Inteligência de Contactabilidade
 
-**Versão:** 3.0  
-**Última atualização:** 2026-02-24  
+**Versão:** 3.1  
+**Última atualização:** 2026-02-26  
 **Autor:** Equipe de Planejamento MIS  
 **Ambiente:** SQL Server (MSSQL) / Python (pandas + pyodbc)  
-**Arquivo SQL:** `SCORE_PROBABILIDADE_CONTATO.sql`
+**Arquivo SQL:** `SCORE_PROBABILIDADE_CONTATO_v3.1.sql`
 
 ---
 
@@ -76,14 +76,14 @@ Ele **não sabe** qual produto está sendo ofertado. Portanto:
 - O histórico de atendimento passado é o melhor preditor do comportamento futuro
 - Separação por campanha **não é necessária** para medir chance de contato
 
-### 2.2 Premissa de Composição — Modelo Híbrido em Dois Níveis
+### 2.2 Premissa de Composição — Modelo Híbrido em Dois Níveis (Simétrico)
 
-O modelo opera em **dois níveis hierárquicos** combinados:
+O modelo opera em **dois níveis hierárquicos** combinados, ambos com a **mesma estrutura de 3 componentes:**
 
 | Camada           | Peso   | O que captura                                           |
 | ---------------- | ------ | ------------------------------------------------------- |
 | 📱 **Telefone**  | **70%**| Eficiência daquele número específico para gerar contato  |
-| 👤 **Cliente**   | **30%**| Comportamento estrutural e fadiga global do cliente      |
+| 👤 **Cliente**   | **30%**| Comportamento estrutural, recência e fadiga global       |
 
 **Justificativa dos pesos:**
 - **70% Telefone:** O número discado é o fator mais determinante. Um celular pessoal ativo tem comportamento radicalmente diferente de um fixo antigo.
@@ -97,12 +97,15 @@ O modelo opera em **dois níveis hierárquicos** combinados:
 | Recência (`dias_desde_ultima`)| 20%          | Quanto tempo de "descanso" o número teve  |
 | (1 - Fadiga) (`attempts_30d`) | 20%          | Pressão recente neste número              |
 
-### Sub-composição do Score Cliente:
+### Sub-composição do Score Cliente (v3.1 — atualizada):
 
-| Componente                          | Peso interno | O que captura                              |
-| ----------------------------------- | ------------ | ------------------------------------------ |
-| `answer_rate_cli`                   | 70%          | Comportamento estrutural de atendimento     |
-| (1 - Fadiga global) (`attempts_30d`)| 30%          | Saturação global em todos os telefones      |
+| Componente                                | Peso interno | O que captura                                  |
+| ----------------------------------------- | ------------ | ---------------------------------------------- |
+| `answer_rate_cli`                         | 60%          | Comportamento estrutural de atendimento         |
+| Recência global (`dias_desde_ultima_cli`) | 20%          | Quanto tempo de "descanso" o cliente teve       |
+| (1 - Fadiga global) (`attempts_30d_cli`)  | 20%          | Saturação global em todos os telefones          |
+
+> **Evolução v3.1:** Ambas as camadas agora possuem a **mesma estrutura simétrica** de 3 componentes (60% eficiência + 20% recência + 20% anti-fadiga), tornando o modelo mais coerente e incluindo o efeito de "descanso" do cliente como fator de probabilidade.
 
 ### 2.3 Premissa de Blindagem
 
@@ -147,13 +150,17 @@ O modelo é construído com **CTEs (Common Table Expressions)** em três etapas:
 │                                                      │
 │  Calcula:                                            │
 │  ├── score_telefone  (0 a 1)  ─── peso 70%          │
+│  │    ├── 60% answer_rate_tel                        │
+│  │    ├── 20% recência_tel                           │
+│  │    └── 20% (1 - fadiga_tel)                       │
 │  ├── score_cliente   (0 a 1)  ─── peso 30%          │
+│  │    ├── 60% answer_rate_cli                        │
+│  │    ├── 20% recência_cli         ← NOVO v3.1      │
+│  │    └── 20% (1 - fadiga_cli)                       │
 │  ├── score_final     (0 a 100)                      │
 │  └── classificacao_score (A/B/C/D/E)                │
 └─────────────────────────────────────────────────────┘
 ```
-
-**Diferença da versão anterior (v2.0):** A query anterior usava apenas uma subquery no nível (Cliente, Telefone). A nova versão adiciona a **camada de cliente** como CTE separada, permitindo que o comportamento global do cliente ajuste o score do telefone.
 
 ---
 
@@ -371,8 +378,6 @@ DATEDIFF(DAY, MAX(l.Dt_Ligacao), GETDATE())
 | 14–29 | Contato recente     | 0.5               | Alguma chance de fadiga                    |
 | < 14  | Contato muito recente| 0.3              | Maior risco de não atender                 |
 
-> **Melhoria v3.0:** Adicionada a faixa 14–29 dias (0.5) que não existia na v2.0, tornando a graduação mais suave.
-
 ---
 
 ### 6.8 `attempts_30d_tel`
@@ -391,8 +396,6 @@ SUM(CASE WHEN l.Dt_Ligacao >= DATEADD(DAY, -30, GETDATE()) THEN 1 ELSE 0 END)
 | 4–5             | 0.7             | **0.3**      | Pressão alta                          |
 | 2–3             | 0.4             | **0.6**      | Pressão moderada                      |
 | 0–1             | 0.0             | **1.0**      | Sem pressão recente                   |
-
-> **Melhoria v3.0:** Adicionada a faixa 4–5 (0.7) que não existia na v2.0, criando uma transição mais gradual.
 
 ---
 
@@ -477,7 +480,7 @@ ISNULL(
 
 **O que mede:** **Comportamento estrutural do cliente.** Independente do número, o cliente costuma atender a Brasilseg?
 
-**Peso efetivo no score final:** 21% (0.70 × 0.30 × 100)
+**Peso efetivo no score final:** 18% (0.60 × 0.30 × 100)
 
 **Perfis típicos:**
 
@@ -502,7 +505,18 @@ MIN(dias_desde_ultima_tel)
 
 **Usa `MIN`** porque basta ter sido acionado em um telefone recentemente para considerar contato recente.
 
-**Uso atual:** Métrica informativa exposta no resultado.
+**Impacto direto no score_cliente (peso 20% — componente de recência global):**
+
+| Dias  | Faixa               | Fator de recência | Significado                                    |
+| ----- | ------------------- | ----------------- | ---------------------------------------------- |
+| ≥ 60  | Descanso longo      | 1.0               | Cliente "descansado", máxima disponibilidade    |
+| 30–59 | Descanso moderado   | 0.7               | Período razoável desde último contato           |
+| 14–29 | Contato recente     | 0.5               | Alguma chance de o cliente estar saturado        |
+| < 14  | Contato muito recente| 0.3              | Maior risco de rejeição por excesso de contato  |
+
+> **Novo na v3.1:** Esta métrica agora participa diretamente do cálculo do score_cliente, usando as mesmas faixas do nível telefone. Isso garante que clientes que não são contactados há mais tempo recebam um bônus de probabilidade.
+
+- Peso efetivo no score final: **6%** (0.20 × 0.30 × 100)
 
 ---
 
@@ -514,7 +528,7 @@ SUM(attempts_30d_tel)
 
 **Definição:** Total de tentativas nos últimos 30 dias em **todos os telefones** do cliente.
 
-**Impacto direto no score_cliente (peso 30% — componente de fadiga global):**
+**Impacto direto no score_cliente (peso 20% — componente de fadiga global):**
 
 | Tentativas 30d (global) | Fator de fadiga | (1 - fadiga) | Significado                        |
 | ------------------------ | --------------- | ------------ | ---------------------------------- |
@@ -623,25 +637,54 @@ O score_telefone varia entre **0.06** (pior caso teórico) e **1.00** (melhor ca
 
 ## 9. Score Cliente — Composição (30%)
 
-### Fórmula:
+### Fórmula (v3.1 — atualizada):
 
 ```sql
-score_cliente = (0.70 × answer_rate_cli)
-             + (0.30 × (1 - fator_fadiga_cli))
+score_cliente = (0.60 × answer_rate_cli)
+             + (0.20 × fator_recencia_cli)
+             + (0.20 × (1 - fator_fadiga_cli))
 ```
+
+> **Evolução v3.1:** A fórmula anterior era `0.70 × answer_rate_cli + 0.30 × (1 - fadiga)`. A nova versão inclui o fator de recência global do cliente, tornando a estrutura simétrica à do score_telefone.
 
 ### Componentes:
 
-#### 9.1 Componente 1: answer_rate_cli (70%)
+#### 9.1 Componente 1: answer_rate_cli (60%)
 
 Taxa global de atendimento do cliente em todos os telefones.
 
 - Range: 0.0 a 1.0
-- Peso efetivo no score final: **21%** (0.70 × 0.30 × 100)
+- Peso efetivo no score final: **18%** (0.60 × 0.30 × 100)
 
-**Por que 70%?** O comportamento estrutural do cliente é a informação mais valiosa no nível de cliente. Um cliente que historicamente atende em 40% das tentativas tem esse padrão independente do número.
+**Por que 60%?** O comportamento estrutural do cliente é a informação mais valiosa no nível de cliente. Um cliente que historicamente atende em 40% das tentativas tem esse padrão independente do número.
 
-#### 9.2 Componente 2: (1 - Fadiga global) (30%)
+#### 9.2 Componente 2: Recência global (20%) — NOVO v3.1
+
+```sql
+fator_recencia_cli = CASE
+    WHEN dias_desde_ultima_cli >= 60 THEN 1.0
+    WHEN dias_desde_ultima_cli >= 30 THEN 0.7
+    WHEN dias_desde_ultima_cli >= 14 THEN 0.5
+    ELSE 0.3
+END
+```
+
+Clientes que não são contactados há mais tempo recebem um bônus no score. As faixas são **idênticas** às do nível telefone:
+
+| Faixa (dias)    | Valor | Significado                                          |
+| --------------- | ----- | ---------------------------------------------------- |
+| ≥ 60            | 1.0   | Cliente descansado, máxima probabilidade de atender   |
+| 30–59           | 0.7   | Intervalo razoável                                    |
+| 14–29           | 0.5   | Contato recente, algum risco de saturação             |
+| < 14            | 0.3   | Contato muito recente em pelo menos um telefone       |
+
+**Justificativa:** Mesmo que o score_telefone já capture a recência do número específico, a recência global do cliente captura um efeito diferente — a **disposição geral do cliente** em atender. Um cliente que não é contactado há 60 dias (em nenhum telefone) está mais propenso a atender do que um que recebeu ligações ontem em outro número.
+
+- Peso efetivo no score final: **6%** (0.20 × 0.30 × 100)
+
+> **Nota:** Embora o peso efetivo de 6% pareça baixo, em cenários onde recência_tel e recência_cli divergem significativamente (ex.: telefone novo de um cliente muito trabalhado), esse componente tem impacto perceptível.
+
+#### 9.3 Componente 3: (1 - Fadiga global) (20%)
 
 ```sql
 fator_fadiga_cli = CASE
@@ -661,16 +704,29 @@ componente_fadiga_cli = 1.0 - fator_fadiga_cli
 | 8–11             | 0.7          | **0.3**      | Penalização forte               |
 | ≥ 12             | 1.0          | **0.0**      | Score zerado neste componente  |
 
-- Peso efetivo no score final: **9%** (0.30 × 0.30 × 100)
+- Peso efetivo no score final: **6%** (0.20 × 0.30 × 100)
 
-**Exemplo de impacto da camada cliente:**
+### Tabela completa — Todos os cenários do score_cliente:
 
-Imagine dois telefones com `answer_rate_tel = 0.30`, `dias_desde_ultima = 45`, `attempts_30d_tel = 1`:
+O score_cliente varia entre **0.06** (pior caso teórico) e **1.00** (melhor caso).
 
-| Cenário           | answer_rate_cli | attempts_30d_cli | score_cliente | Efeito no final |
-| ----------------- | --------------- | ---------------- | ------------- | --------------- |
-| Cliente receptivo | 0.45            | 2                | 0.615         | +18.5 pontos    |
-| Cliente arredio   | 0.05            | 10               | 0.125         | +3.8 pontos     |
+| answer_rate_cli | recência_cli | fadiga_cli     | score_cliente |
+| --------------- | ------------ | -------------- | ------------- |
+| 0.50            | ≥60d (1.0)   | 0 tent (1.0)   | **0.70**     |
+| 0.50            | <14d (0.3)   | ≥12 tent (0.0) | **0.36**     |
+| 0.30            | 30d (0.7)    | 5 tent (0.6)   | **0.44**     |
+| 0.10            | ≥60d (1.0)   | 0 tent (1.0)   | **0.46**     |
+| 0.00            | <14d (0.3)   | ≥12 tent (0.0) | **0.06**     |
+| 1.00            | ≥60d (1.0)   | 0 tent (1.0)   | **1.00**     |
+
+**Exemplo de impacto da camada cliente (v3.1):**
+
+Imagine dois telefones com `answer_rate_tel = 0.30`, `dias_desde_ultima_tel = 45`, `attempts_30d_tel = 1`:
+
+| Cenário           | answer_rate_cli | dias_desde_cli | attempts_30d_cli | score_cliente | Efeito no final |
+| ----------------- | --------------- | -------------- | ---------------- | ------------- | --------------- |
+| Cliente receptivo | 0.45            | 45             | 2                | 0.61          | +18.3 pontos    |
+| Cliente arredio   | 0.05            | 3              | 10               | 0.12          | +3.6 pontos     |
 
 Diferença de **≈15 pontos** no score final, mesmo com o mesmo telefone!
 
@@ -684,7 +740,7 @@ Diferença de **≈15 pontos** no score final, mesmo com o mesmo telefone!
 Score_Final = (0.70 × Score_Telefone + 0.30 × Score_Cliente) × 100
 ```
 
-### Desdobramento completo:
+### Desdobramento completo (v3.1):
 
 ```
 Score_Final = 100 × [
@@ -694,22 +750,26 @@ Score_Final = 100 × [
       + 0.20 × (1 - fator_fadiga_tel)             ← 14% peso efetivo
     )
   + 0.30 × (
-        0.70 × answer_rate_cli                    ← 21% peso efetivo
-      + 0.30 × (1 - fator_fadiga_cli)             ←  9% peso efetivo
+        0.60 × answer_rate_cli                    ← 18% peso efetivo
+      + 0.20 × fator_recencia_cli                 ←  6% peso efetivo  ← NOVO v3.1
+      + 0.20 × (1 - fator_fadiga_cli)             ←  6% peso efetivo
     )
 ]
 ```
 
-### Mapa de pesos efetivos:
+### Mapa de pesos efetivos (v3.1):
 
-| #  | Variável                | Camada   | Peso interno | Peso camada | **Peso efetivo** |
-| -- | ----------------------- | -------- | ------------ | ----------- | ---------------- |
-| 1  | `answer_rate_tel`       | Telefone | 60%          | 70%         | **42.0%**        |
-| 2  | `fator_recencia_tel`    | Telefone | 20%          | 70%         | **14.0%**        |
-| 3  | `(1-fadiga_tel)`        | Telefone | 20%          | 70%         | **14.0%**        |
-| 4  | `answer_rate_cli`       | Cliente  | 70%          | 30%         | **21.0%**        |
-| 5  | `(1-fadiga_cli)`        | Cliente  | 30%          | 30%         | **9.0%**         |
-|    |                         |          |              | **TOTAL:**  | **100.0%**       |
+| #  | Variável                | Camada   | Peso interno | Peso camada | **Peso efetivo** | Δ vs v3.0  |
+| -- | ----------------------- | -------- | ------------ | ----------- | ---------------- | ---------- |
+| 1  | `answer_rate_tel`       | Telefone | 60%          | 70%         | **42.0%**        | =          |
+| 2  | `fator_recencia_tel`    | Telefone | 20%          | 70%         | **14.0%**        | =          |
+| 3  | `(1-fadiga_tel)`        | Telefone | 20%          | 70%         | **14.0%**        | =          |
+| 4  | `answer_rate_cli`       | Cliente  | 60%          | 30%         | **18.0%**        | era 21.0%  |
+| 5  | `fator_recencia_cli`    | Cliente  | 20%          | 30%         | **6.0%**         | **NOVO**   |
+| 6  | `(1-fadiga_cli)`        | Cliente  | 20%          | 30%         | **6.0%**         | era 9.0%   |
+|    |                         |          |              | **TOTAL:**  | **100.0%**       |            |
+
+> **Comparação v3.0 → v3.1:** O `answer_rate_cli` perdeu 3 p.p. (de 21% para 18%) e a fadiga_cli perdeu 3 p.p. (de 9% para 6%) para acomodar os 6% do novo componente de recência. A camada telefone permanece inalterada.
 
 ### Range:
 
@@ -899,6 +959,7 @@ Janela **deslizante** calculada dinamicamente a cada execução.
 │  direto) │  │ GROUP BY Cliente_id  │
 │          │  │                      │
 │          │  │ ► answer_rate_cli    │
+│          │  │ ► dias_desde_ult_cli │
 │          │  │ ► attempts_30d_cli   │
 │          │  │ ► qtd_telefones_cli  │
 └────┬─────┘  └──────────┬──────────┘
@@ -909,13 +970,17 @@ Janela **deslizante** calculada dinamicamente a cada execução.
 │    tel.Cliente_id = cli.       │
 │                                │
 │  ► score_telefone   (0–1)      │
+│    60% answer + 20% rec + 20% │
+│    (1-fad)                     │
 │  ► score_cliente    (0–1)      │
+│    60% answer + 20% rec + 20% │
+│    (1-fad)        ← SIMÉTRICO │
 │  ► score_final      (0–100)    │
 │  ► classificacao    (A-E)      │
 └────────────────────────────────┘
 ```
 
-### 15.2 Composição do Score Final
+### 15.2 Composição do Score Final (v3.1)
 
 ```
 score_final (0-100) = 100 × [
@@ -926,10 +991,13 @@ score_final (0-100) = 100 × [
 │           └── 20% ── (1 - fadiga_tel) ────── 1 - f(attempts_30d_tel) [0.0–1.0]
 │
 └── 30% ─── score_cliente
-            ├── 70% ── answer_rate_cli ──────── total_answered_cli / total_attempts_cli
-            └── 30% ── (1 - fadiga_cli) ────── 1 - f(attempts_30d_cli) [0.0–1.0]
+            ├── 60% ── answer_rate_cli ──────── total_answered_cli / total_attempts_cli
+            ├── 20% ── fator_recencia_cli ───── f(dias_desde_ultima_cli) [0.3–1.0]  ← NOVO v3.1
+            └── 20% ── (1 - fadiga_cli) ────── 1 - f(attempts_30d_cli) [0.0–1.0]
 ]
 ```
+
+> **Simetria v3.1:** Ambas as camadas possuem a mesma estrutura de 3 componentes (60/20/20), facilitando a interpretação e manutenção do modelo.
 
 ---
 
@@ -943,6 +1011,7 @@ score_final (0-100) = 100 × [
 | dias_desde_ultima_tel     | 45     | Telefone |
 | attempts_30d_tel          | 1      | Telefone |
 | answer_rate_cli           | 0.42   | Cliente  |
+| dias_desde_ultima_cli     | 45     | Cliente  |
 | attempts_30d_cli          | 3      | Cliente  |
 
 **Cálculo:**
@@ -953,13 +1022,13 @@ Score Telefone:
   =  0.30           +   0.14          +   0.20
   =  0.64
 
-Score Cliente:
-  = (0.70 × 0.42)  +  (0.30 × (1 - 0.0))
-  =  0.294          +   0.30
-  =  0.594
+Score Cliente (v3.1):
+  = (0.60 × 0.42)  +  (0.20 × 0.7)  +  (0.20 × (1 - 0.0))
+  =  0.252          +   0.14          +   0.20
+  =  0.592
 
 Score Final:
-  = (0.70 × 0.64  +  0.30 × 0.594) × 100
+  = (0.70 × 0.64  +  0.30 × 0.592) × 100
   = (0.448 + 0.178) × 100
   = 62.6  →  Classificação B (Boa Probabilidade)
 ```
@@ -974,6 +1043,7 @@ Score Final:
 | dias_desde_ultima_tel     | 5      | Telefone |
 | attempts_30d_tel          | 7      | Telefone |
 | answer_rate_cli           | 0.08   | Cliente  |
+| dias_desde_ultima_cli     | 2      | Cliente  |
 | attempts_30d_cli          | 14     | Cliente  |
 
 **Cálculo:**
@@ -984,15 +1054,15 @@ Score Telefone:
   =  0.018          +   0.06          +   0.00
   =  0.078
 
-Score Cliente:
-  = (0.70 × 0.08)  +  (0.30 × (1 - 1.0))
-  =  0.056          +   0.00
-  =  0.056
+Score Cliente (v3.1):
+  = (0.60 × 0.08)  +  (0.20 × 0.3)  +  (0.20 × (1 - 1.0))
+  =  0.048          +   0.06          +   0.00
+  =  0.108
 
 Score Final:
-  = (0.70 × 0.078  +  0.30 × 0.056) × 100
-  = (0.055 + 0.017) × 100
-  = 7.2  →  Classificação E (Muito Baixa)
+  = (0.70 × 0.078  +  0.30 × 0.108) × 100
+  = (0.055 + 0.032) × 100
+  = 8.7  →  Classificação E (Muito Baixa)
 ```
 
 ---
@@ -1005,6 +1075,7 @@ Score Final:
 | dias_desde_ultima_tel     | 2      | Telefone |
 | attempts_30d_tel          | 1      | Telefone |
 | answer_rate_cli           | 0.45   | Cliente  |
+| dias_desde_ultima_cli     | 2      | Cliente  |
 | attempts_30d_cli          | 3      | Cliente  |
 
 **Cálculo:**
@@ -1015,18 +1086,18 @@ Score Telefone:
   =  0.00           +   0.06          +   0.20
   =  0.26
 
-Score Cliente:
-  = (0.70 × 0.45)  +  (0.30 × (1 - 0.0))
-  =  0.315          +   0.30
-  =  0.615
+Score Cliente (v3.1):
+  = (0.60 × 0.45)  +  (0.20 × 0.3)  +  (0.20 × (1 - 0.0))
+  =  0.27           +   0.06          +   0.20
+  =  0.53
 
 Score Final:
-  = (0.70 × 0.26  +  0.30 × 0.615) × 100
-  = (0.182 + 0.185) × 100
-  = 36.7  →  Classificação D (Baixa)
+  = (0.70 × 0.26  +  0.30 × 0.53) × 100
+  = (0.182 + 0.159) × 100
+  = 34.1  →  Classificação D (Baixa)
 ```
 
-**Leitura:** Sem a camada cliente, este número teria ~18 pontos. A camada cliente adicionou ~18 pontos porque o cliente é receptivo. O número é novo, vale mais uma tentativa.
+**Leitura:** Sem a camada cliente, este número teria ~18 pontos. A camada cliente adicionou ~16 pontos porque o cliente é receptivo.
 
 ---
 
@@ -1034,24 +1105,63 @@ Score Final:
 
 Demonstra como a camada cliente diferencia o mesmo padrão de telefone:
 
-| Métrica             | Cliente A (receptivo) | Cliente B (arredio)   |
-| ------------------- | --------------------- | --------------------- |
-| answer_rate_tel     | 0.25                  | 0.25                  |
-| dias_desde_ultima_tel| 30                   | 30                    |
-| attempts_30d_tel    | 2                     | 2                     |
-| **answer_rate_cli** | **0.40**              | **0.05**              |
-| **attempts_30d_cli**| **4**                 | **9**                 |
+| Métrica              | Cliente A (receptivo)  | Cliente B (arredio)    |
+| -------------------- | ---------------------- | ---------------------- |
+| answer_rate_tel      | 0.25                   | 0.25                   |
+| dias_desde_ultima_tel| 30                     | 30                     |
+| attempts_30d_tel     | 2                      | 2                      |
+| **answer_rate_cli**  | **0.40**               | **0.05**               |
+| **dias_desde_ult_cli**| **30**                | **3**                  |
+| **attempts_30d_cli** | **4**                  | **9**                  |
 
 ```
-                     Cliente A                  Cliente B
-Score Telefone:      0.39                       0.39       (idênticos)
-Score Cliente:       0.46                       0.125
-Score Final:         (0.70×0.39+0.30×0.46)×100  (0.70×0.39+0.30×0.125)×100
-                   = 41.1                      = 31.1
-Classificação:       C (Moderada)               D (Baixa)
+                     Cliente A                    Cliente B
+Score Telefone:      0.39                         0.39       (idênticos)
+
+Score Cliente (v3.1):
+  A: (0.60×0.40) + (0.20×0.7) + (0.20×0.6) = 0.24 + 0.14 + 0.12 = 0.50
+  B: (0.60×0.05) + (0.20×0.3) + (0.20×0.3) = 0.03 + 0.06 + 0.06 = 0.15
+
+Score Final:        (0.70×0.39+0.30×0.50)×100   (0.70×0.39+0.30×0.15)×100
+                   = 42.3                        = 31.8
+Classificação:       C (Moderada)                 D (Baixa)
 ```
 
-**Diferença de 10 pontos** — e uma mudança de classificação — apenas por causa do comportamento histórico do cliente. Isso é o valor da camada cliente.
+**Diferença de ~10.5 pontos** — e uma mudança de classificação — por causa do comportamento histórico e recência do cliente.
+
+---
+
+### Exemplo 5 (NOVO v3.1): Impacto isolado da recência do cliente
+
+Demonstra como a recência global do cliente afeta o score quando tudo mais é igual:
+
+| Métrica              | Cenário A (desc. longo) | Cenário B (cont. recente) |
+| -------------------- | ----------------------- | ------------------------- |
+| answer_rate_tel      | 0.30                    | 0.30                      |
+| dias_desde_ultima_tel| 40                      | 40                        |
+| attempts_30d_tel     | 0                       | 0                         |
+| answer_rate_cli      | 0.30                    | 0.30                      |
+| **dias_desde_ult_cli**| **65**                 | **5**                     |
+| attempts_30d_cli     | 0                       | 0                         |
+
+```
+Score Telefone (igual em ambos):
+  = (0.60 × 0.30) + (0.20 × 0.7) + (0.20 × 1.0)
+  = 0.18 + 0.14 + 0.20 = 0.52
+
+Score Cliente A: (0.60 × 0.30) + (0.20 × 1.0) + (0.20 × 1.0)
+              = 0.18 + 0.20 + 0.20 = 0.58
+
+Score Cliente B: (0.60 × 0.30) + (0.20 × 0.3) + (0.20 × 1.0)
+              = 0.18 + 0.06 + 0.20 = 0.44
+
+Score Final A: (0.70 × 0.52 + 0.30 × 0.58) × 100 = 53.8  →  C (Moderada)
+Score Final B: (0.70 × 0.52 + 0.30 × 0.44) × 100 = 49.6  →  C (Moderada)
+
+Δ = 4.2 pontos — apenas por recência do cliente
+```
+
+**Leitura:** O componente de recência_cli sozinho pode contribuir com até ~4 pontos de diferença. Em cenários limítrofes (perto de 40, 60 ou 80), isso pode mudar a classificação.
 
 ---
 
@@ -1149,11 +1259,15 @@ O filtro `WHERE Dt_Ligacao >= '2026-02-10'` é hard-coded. Recomenda-se parametr
 
 ### 19.5 Pesos por Expertise
 
-Os pesos (70/30 telefone/cliente e sub-pesos) foram definidos por expertise de negócio, não por otimização estatística.
+Os pesos (70/30 telefone/cliente e sub-pesos 60/20/20) foram definidos por expertise de negócio, não por otimização estatística.
 
 ### 19.6 Métricas Informativas
 
 `cpc_rate_tel`, `avg_duracao_conectado_tel`, `answered_30d_tel`, `distinct_campaigns`, `distinct_mailings`, `answered_30d_cli` são calculadas mas **não participam do score**. Estão disponíveis para análise e futuras evoluções.
+
+### 19.7 Recência Telefone vs Recência Cliente
+
+Quando o cliente possui apenas 1 telefone, `dias_desde_ultima_tel` = `dias_desde_ultima_cli`, fazendo com que o componente de recência contribua de forma duplicada (14% + 6% = 20% efetivo). Em clientes com múltiplos telefones, os valores podem divergir, capturando efeitos diferentes.
 
 ---
 
@@ -1178,18 +1292,25 @@ Os pesos (70/30 telefone/cliente e sub-pesos) foram definidos por expertise de n
 
 | Data       | Versão | Alteração                                                              |
 | ---------- | ------ | ---------------------------------------------------------------------- |
-| 2026-02-24 | 3.0    | **Query reestruturada com CTEs + camada cliente** — alinhada com doc   |
-| 2026-02-24 | 3.0    | Score agora é: 70% Telefone + 30% Cliente (conforme documentação)      |
+| 2026-02-26 | 3.1    | **Inclusão do fator recência no score_cliente**                        |
+| 2026-02-26 | 3.1    | Score Cliente agora: 60% answer_rate + 20% recência + 20% (1-fadiga)  |
+| 2026-02-26 | 3.1    | Faixas de recência_cli idênticas às do telefone (≥60/≥30/≥14/<14)     |
+| 2026-02-26 | 3.1    | Pesos efetivos: answer_rate_cli 21%→18%, fadiga_cli 9%→6%, recência_cli +6% |
+| 2026-02-26 | 3.1    | Arquitetura agora simétrica: ambas as camadas com 60/20/20             |
+| 2026-02-26 | 3.1    | Adicionado Exemplo 5 (impacto isolado recência_cli)                    |
+| 2026-02-26 | 3.1    | Adicionada limitação 19.7 (recência duplicada em clientes 1 tel.)      |
+| 2026-02-24 | 3.0    | Query reestruturada com CTEs + camada cliente — alinhada com doc       |
+| 2026-02-24 | 3.0    | Score: 70% Telefone + 30% Cliente (conforme documentação)              |
 | 2026-02-24 | 3.0    | Score Telefone: 60% answer_rate + 20% recência + 20% (1-fadiga)       |
-| 2026-02-24 | 3.0    | Score Cliente: 70% answer_rate_cli + 30% (1-fadiga_cli)               |
+| 2026-02-24 | 3.0    | Score Cliente (v3.0): 70% answer_rate_cli + 30% (1-fadiga_cli)        |
 | 2026-02-24 | 3.0    | Faixas de recência refinadas (4 degraus em vez de 3)                   |
 | 2026-02-24 | 3.0    | Faixas de fadiga refinadas (4 degraus em vez de 3)                     |
 | 2026-02-24 | 3.0    | Adicionada classificação automática A/B/C/D/E na query                 |
 | 2026-02-24 | 3.0    | Thresholds de fadiga cliente (4/8/12) separados dos telefone (2/4/6)   |
-| 2026-02-24 | 2.0    | Documentação v2 com base na query original (contact/commercial/fatigue)|
+| 2026-02-24 | 2.0    | Documentação v2 com base na query original                             |
 | 2026-02-24 | 1.0    | Documentação inicial                                                   |
 
 ---
 
-> **Resumo da evolução v2.0 → v3.0:**  
-> A v2.0 usava uma subquery flat com 3 scores (contact 40% + commercial 35% + fatigue 25%). A v3.0 implementa a arquitetura **híbrida de dois níveis** (Telefone 70% + Cliente 30%) originalmente descrita na documentação de design, com CTEs separadas para cada nível de agregação. Isso permite que o comportamento global do cliente ajuste o score de cada telefone individual, resultando em priorização mais inteligente.
+> **Resumo da evolução v3.0 → v3.1:**  
+> A v3.0 usava no score_cliente apenas 2 componentes: `70% answer_rate_cli + 30% (1-fadiga_cli)`. A v3.1 adiciona o **fator de recência global do cliente** e redistribui os pesos para `60% answer_rate_cli + 20% recência_cli + 20% (1-fadiga_cli)`, tornando a arquitetura **simétrica** entre as camadas telefone e cliente. Isso permite que clientes "descansados" (sem contato há mais tempo) recebam um bônus na probabilidade de atendimento, capturando o efeito de que a disposição em atender melhora com o tempo sem acionamento.
