@@ -1,15 +1,15 @@
 -- =====================================================================
--- MODELO DE SCORE DE PROBABILIDADE DE CONTATO
+-- MODELO DE SCORE DE PROBABILIDADE DE CONTATO  v3.1
 -- Brasilseg – Inteligência de Contactabilidade
 -- =====================================================================
 --
 -- Arquitetura:
 --   Score Telefone (70%) + Score Cliente (30%) = Score Final (0-100)
 --
--- CTEs:
---   1. metricas_telefone  → agrega no nível (Cliente_id, Numero_Telefone)
---   2. metricas_cliente   → agrega no nível (Cliente_id) — visão global
---   3. SELECT final       → combina ambas e calcula os scores
+-- Score Telefone: 60% answer_rate + 20% recência + 20% (1-fadiga)
+-- Score Cliente:  60% answer_rate + 20% recência + 20% (1-fadiga)
+--
+-- v3.1: Inclusão do fator recência no score_cliente
 -- =====================================================================
 
 WITH metricas_telefone AS (
@@ -194,19 +194,30 @@ SELECT
     ) AS score_telefone,
 
     -- =================================================================
-    -- SCORE CLIENTE (peso 30% no score final)
+    -- SCORE CLIENTE (peso 30% no score final)          ← v3.1 ATUALIZADO
     -- =================================================================
     --
-    -- Composição:
-    --   70% → answer_rate_cli (comportamento estrutural do cliente)
-    --   30% → (1 - fadiga global do cliente em todos os telefones)
+    -- Composição (v3.1):
+    --   60% → answer_rate_cli (comportamento estrutural do cliente)
+    --   20% → recência global (dias desde última ligação em qualquer tel.)
+    --   20% → (1 - fadiga global do cliente em todos os telefones)
     --
     (
-        -- 70% answer_rate_cli
-        (0.70 * c.answer_rate_cli)
+        -- 60% answer_rate_cli
+        (0.60 * c.answer_rate_cli)
         +
-        -- 30% (1 - fadiga global do cliente)
-        (0.30 *
+        -- 20% recência global do cliente
+        (0.20 *
+            CASE
+                WHEN c.dias_desde_ultima_cli >= 60 THEN 1.0
+                WHEN c.dias_desde_ultima_cli >= 30 THEN 0.7
+                WHEN c.dias_desde_ultima_cli >= 14 THEN 0.5
+                ELSE 0.3
+            END
+        )
+        +
+        -- 20% (1 - fadiga global do cliente)
+        (0.20 *
             (1.0 -
                 CASE
                     WHEN c.attempts_30d_cli >= 12 THEN 1.0
@@ -219,7 +230,7 @@ SELECT
     ) AS score_cliente,
 
     -- =================================================================
-    -- SCORE FINAL (0 a 100)
+    -- SCORE FINAL (0 a 100)                            ← v3.1 ATUALIZADO
     -- =================================================================
     --
     -- Fórmula:
@@ -251,11 +262,20 @@ SELECT
             )
         )
         +
-        -- 30% Score Cliente
+        -- 30% Score Cliente (v3.1: agora com recência)
         0.30 * (
-            (0.70 * c.answer_rate_cli)
+            (0.60 * c.answer_rate_cli)
             +
-            (0.30 *
+            (0.20 *
+                CASE
+                    WHEN c.dias_desde_ultima_cli >= 60 THEN 1.0
+                    WHEN c.dias_desde_ultima_cli >= 30 THEN 0.7
+                    WHEN c.dias_desde_ultima_cli >= 14 THEN 0.5
+                    ELSE 0.3
+                END
+            )
+            +
+            (0.20 *
                 (1.0 -
                     CASE
                         WHEN c.attempts_30d_cli >= 12 THEN 1.0
@@ -269,7 +289,7 @@ SELECT
     ) * 100 AS score_final,
 
     -- =================================================================
-    -- CLASSIFICAÇÃO DO SCORE
+    -- CLASSIFICAÇÃO DO SCORE                           ← v3.1 ATUALIZADO
     -- =================================================================
     CASE
         WHEN (
@@ -279,8 +299,9 @@ SELECT
                 + (0.20 * (1.0 - CASE WHEN t.attempts_30d_tel >= 6 THEN 1.0 WHEN t.attempts_30d_tel >= 4 THEN 0.7 WHEN t.attempts_30d_tel >= 2 THEN 0.4 ELSE 0.0 END))
             )
             + 0.30 * (
-                (0.70 * c.answer_rate_cli)
-                + (0.30 * (1.0 - CASE WHEN c.attempts_30d_cli >= 12 THEN 1.0 WHEN c.attempts_30d_cli >= 8 THEN 0.7 WHEN c.attempts_30d_cli >= 4 THEN 0.4 ELSE 0.0 END))
+                (0.60 * c.answer_rate_cli)
+                + (0.20 * CASE WHEN c.dias_desde_ultima_cli >= 60 THEN 1.0 WHEN c.dias_desde_ultima_cli >= 30 THEN 0.7 WHEN c.dias_desde_ultima_cli >= 14 THEN 0.5 ELSE 0.3 END)
+                + (0.20 * (1.0 - CASE WHEN c.attempts_30d_cli >= 12 THEN 1.0 WHEN c.attempts_30d_cli >= 8 THEN 0.7 WHEN c.attempts_30d_cli >= 4 THEN 0.4 ELSE 0.0 END))
             )
         ) * 100 >= 80 THEN 'A - Alta Probabilidade'
         WHEN (
@@ -290,8 +311,9 @@ SELECT
                 + (0.20 * (1.0 - CASE WHEN t.attempts_30d_tel >= 6 THEN 1.0 WHEN t.attempts_30d_tel >= 4 THEN 0.7 WHEN t.attempts_30d_tel >= 2 THEN 0.4 ELSE 0.0 END))
             )
             + 0.30 * (
-                (0.70 * c.answer_rate_cli)
-                + (0.30 * (1.0 - CASE WHEN c.attempts_30d_cli >= 12 THEN 1.0 WHEN c.attempts_30d_cli >= 8 THEN 0.7 WHEN c.attempts_30d_cli >= 4 THEN 0.4 ELSE 0.0 END))
+                (0.60 * c.answer_rate_cli)
+                + (0.20 * CASE WHEN c.dias_desde_ultima_cli >= 60 THEN 1.0 WHEN c.dias_desde_ultima_cli >= 30 THEN 0.7 WHEN c.dias_desde_ultima_cli >= 14 THEN 0.5 ELSE 0.3 END)
+                + (0.20 * (1.0 - CASE WHEN c.attempts_30d_cli >= 12 THEN 1.0 WHEN c.attempts_30d_cli >= 8 THEN 0.7 WHEN c.attempts_30d_cli >= 4 THEN 0.4 ELSE 0.0 END))
             )
         ) * 100 >= 60 THEN 'B - Boa Probabilidade'
         WHEN (
@@ -301,8 +323,9 @@ SELECT
                 + (0.20 * (1.0 - CASE WHEN t.attempts_30d_tel >= 6 THEN 1.0 WHEN t.attempts_30d_tel >= 4 THEN 0.7 WHEN t.attempts_30d_tel >= 2 THEN 0.4 ELSE 0.0 END))
             )
             + 0.30 * (
-                (0.70 * c.answer_rate_cli)
-                + (0.30 * (1.0 - CASE WHEN c.attempts_30d_cli >= 12 THEN 1.0 WHEN c.attempts_30d_cli >= 8 THEN 0.7 WHEN c.attempts_30d_cli >= 4 THEN 0.4 ELSE 0.0 END))
+                (0.60 * c.answer_rate_cli)
+                + (0.20 * CASE WHEN c.dias_desde_ultima_cli >= 60 THEN 1.0 WHEN c.dias_desde_ultima_cli >= 30 THEN 0.7 WHEN c.dias_desde_ultima_cli >= 14 THEN 0.5 ELSE 0.3 END)
+                + (0.20 * (1.0 - CASE WHEN c.attempts_30d_cli >= 12 THEN 1.0 WHEN c.attempts_30d_cli >= 8 THEN 0.7 WHEN c.attempts_30d_cli >= 4 THEN 0.4 ELSE 0.0 END))
             )
         ) * 100 >= 40 THEN 'C - Moderada'
         WHEN (
@@ -312,8 +335,9 @@ SELECT
                 + (0.20 * (1.0 - CASE WHEN t.attempts_30d_tel >= 6 THEN 1.0 WHEN t.attempts_30d_tel >= 4 THEN 0.7 WHEN t.attempts_30d_tel >= 2 THEN 0.4 ELSE 0.0 END))
             )
             + 0.30 * (
-                (0.70 * c.answer_rate_cli)
-                + (0.30 * (1.0 - CASE WHEN c.attempts_30d_cli >= 12 THEN 1.0 WHEN c.attempts_30d_cli >= 8 THEN 0.7 WHEN c.attempts_30d_cli >= 4 THEN 0.4 ELSE 0.0 END))
+                (0.60 * c.answer_rate_cli)
+                + (0.20 * CASE WHEN c.dias_desde_ultima_cli >= 60 THEN 1.0 WHEN c.dias_desde_ultima_cli >= 30 THEN 0.7 WHEN c.dias_desde_ultima_cli >= 14 THEN 0.5 ELSE 0.3 END)
+                + (0.20 * (1.0 - CASE WHEN c.attempts_30d_cli >= 12 THEN 1.0 WHEN c.attempts_30d_cli >= 8 THEN 0.7 WHEN c.attempts_30d_cli >= 4 THEN 0.4 ELSE 0.0 END))
             )
         ) * 100 >= 20 THEN 'D - Baixa'
         ELSE 'E - Muito Baixa'
