@@ -4,6 +4,7 @@
 
 **Versão:** 3.2  
 **Última atualização:** 2026-03-10  
+**Autor:** Equipe de Planejamento MIS  
 **Ambiente:** SQL Server (MSSQL) / Python (pandas + pyodbc)  
 **Arquivo SQL:** `SCORE_PROBABILIDADE_CONTATO_v3.2.sql`
 
@@ -224,7 +225,27 @@ LEFT JOIN configuracao_aux cpc
 - Quando o JOIN resulta em `cpc.tlv_registro_id IS NOT NULL`, a ligação conectada é classificada como CPC
 - Quando resulta em `NULL`, a ligação conectada foi atendida mas **não** pela pessoa certa
 
-### 4.3 Lógica de Classificação CPC
+### 4.3 Tabela de Cadastro: `cliente`
+
+Contém dados cadastrais dos clientes, usada no SELECT final para enriquecer o resultado com o código de negócio do cliente.
+
+| Campo         | Tipo     | Descrição                                                    |
+| ------------- | -------- | ------------------------------------------------------------ |
+| `Cliente_id`  | INT (PK) | Chave primária do cliente (FK da tabela `ligacao`)           |
+| `Cliente_Cod` | VARCHAR  | Código de negócio do cliente (identificador externo/legível) |
+
+**Condição de JOIN (no SELECT final):**
+
+```sql
+LEFT JOIN cliente c
+    ON r.Cliente_id = c.Cliente_id
+```
+
+> Usa-se `LEFT JOIN` para garantir que clientes sem registro na tabela `cliente` não sejam excluídos do resultado do score.
+
+---
+
+### 4.4 Lógica de Classificação CPC
 
 ```
 Ligação feita
@@ -858,6 +879,7 @@ Janela **deslizante** calculada dinamicamente a cada execução.
 | Campo                        | Camada   | Tipo    | Range     | Descrição                                                    |
 | ---------------------------- | -------- | ------- | --------- | ------------------------------------------------------------ |
 | `Cliente_id`                 | —        | INT     | —         | FK do cliente                                                |
+| `Cliente_Cod`                | —        | VARCHAR | —         | **Código de negócio do cliente (via JOIN `cliente`)** ← v3.2 |
 | `Numero_Telefone`            | —        | VARCHAR | —         | Número discado                                               |
 | `rank_telefone_cliente`      | Ranking  | INT     | ≥ 1       | **Posição do telefone no cliente (1 = melhor score_telefone)**|
 | `melhor_telefone_cliente`    | Ranking  | BIT     | 0 / 1     | **Flag: 1 = telefone com maior score_telefone do cliente**   |
@@ -900,6 +922,11 @@ Janela **deslizante** calculada dinamicamente a cada execução.
 │ ligacao  │◄──────────────────│ configuracao_aux  │
 │          │  ON Tipo_Processo  │ (campo_aux=2126) │
 └────┬─────┘                   └──────────────────┘
+
+                              ┌──────────────────┐
+                              │     cliente       │  ← enriquece SELECT final
+                              │  (Cliente_Cod)    │
+                              └──────────────────┘
      │
      │  WHERE Dt_Ligacao >= '2026-01-01'
      │
@@ -952,7 +979,11 @@ Janela **deslizante** calculada dinamicamente a cada execução.
            ▼
 ┌────────────────────────────────┐
 │  SELECT FINAL                  │
+│  LEFT JOIN cliente             │  ← enriquece com Cliente_Cod
 │                                │
+│  ► Cliente_id                  │
+│  ► Cliente_Cod  ← NOVO v3.2   │
+│  ► Numero_Telefone             │
 │  ► rank_telefone_cliente       │
 │  ► melhor_telefone_cliente     │
 │  ► [todas as métricas]         │
@@ -1215,6 +1246,7 @@ ORDER BY diferenca DESC;
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `ligacao`           | Ligacao_Cod, Cliente_id, Numero_Telefone, Dt_Ligacao, Conectado, Duracao_Conectado, Tipo_Processo_id, Campanha_id, Mailing_id |
 | `configuracao_aux`  | tlv_registro_id, campo_aux_id                                                                                              |
+| `cliente`           | Cliente_id, Cliente_Cod                                                                                                    |
 
 ### 19.3 Configurações Fixas
 
@@ -1285,6 +1317,7 @@ Quando o cliente possui apenas 1 telefone, `dias_desde_ultima_tel` = `dias_desde
 
 | Data       | Versão | Alteração                                                                          |
 | ---------- | ------ | ---------------------------------------------------------------------------------- |
+| 2026-03-10 | 3.2    | **Inclusão de `Cliente_Cod` via `LEFT JOIN cliente` no SELECT final**              |
 | 2026-03-10 | 3.2    | **Inclusão de `rank_telefone_cliente` e `melhor_telefone_cliente`**                |
 | 2026-03-10 | 3.2    | CTE `scores_calculados` extraído do SELECT final para permitir o ranking           |
 | 2026-03-10 | 3.2    | Novo CTE `ranking` com `ROW_NUMBER() OVER (PARTITION BY Cliente_id)`               |
@@ -1313,4 +1346,4 @@ Quando o cliente possui apenas 1 telefone, `dias_desde_ultima_tel` = `dias_desde
 ---
 
 > **Resumo da evolução v3.1 → v3.2:**  
-> A v3.1 consolidou a arquitetura simétrica de dois níveis. A v3.2 adiciona o **índice de melhor telefone por cliente** via dois novos campos: `rank_telefone_cliente` (posição ordinal) e `melhor_telefone_cliente` (flag binária). O ranking é calculado **exclusivamente por `score_telefone`**, não por `score_final`, pois o `score_cliente` é idêntico para todos os telefones de um mesmo cliente e portanto não discrimina qual número é melhor — apenas o score do telefone carrega informação diferencial dentro do cliente. Isso torna o modelo operacionalmente completo: além de pontuar a probabilidade de contato, ele indica diretamente qual número discar primeiro.
+> A v3.1 consolidou a arquitetura simétrica de dois níveis. A v3.2 adiciona o **índice de melhor telefone por cliente** via dois novos campos: `rank_telefone_cliente` (posição ordinal) e `melhor_telefone_cliente` (flag binária). O ranking é calculado **exclusivamente por `score_telefone`**, não por `score_final`, pois o `score_cliente` é idêntico para todos os telefones de um mesmo cliente e portanto não discrimina qual número é melhor — apenas o score do telefone carrega informação diferencial dentro do cliente. A v3.2 também enriquece o resultado com `Cliente_Cod` via `LEFT JOIN cliente`, expondo o código de negócio do cliente diretamente na saída. Isso torna o modelo operacionalmente completo: além de pontuar a probabilidade de contato, ele indica diretamente qual número discar primeiro e apresenta o identificador de negócio pronto para integração downstream.
