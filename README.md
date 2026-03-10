@@ -2,11 +2,10 @@
 
 ### Brasilseg – Inteligência de Contactabilidade
 
-**Versão:** 3.1  
-**Última atualização:** 2026-02-26  
-**Autor:** Equipe de Planejamento MIS  
+**Versão:** 3.2  
+**Última atualização:** 2026-03-10  
 **Ambiente:** SQL Server (MSSQL) / Python (pandas + pyodbc)  
-**Arquivo SQL:** `SCORE_PROBABILIDADE_CONTATO_v3.1.sql`
+**Arquivo SQL:** `SCORE_PROBABILIDADE_CONTATO_v3.2.sql`
 
 ---
 
@@ -22,17 +21,18 @@
 8. [Score Telefone — Composição (70%)](#8-score-telefone--composição-70)
 9. [Score Cliente — Composição (30%)](#9-score-cliente--composição-30)
 10. [Score Final — Cálculo e Pesos Efetivos](#10-score-final--cálculo-e-pesos-efetivos)
-11. [Interpretação Operacional](#11-interpretação-operacional)
-12. [Tratamento de Nulls e Edge Cases](#12-tratamento-de-nulls-e-edge-cases)
-13. [Filtros e Escopo Temporal](#13-filtros-e-escopo-temporal)
-14. [Glossário Completo de Campos](#14-glossário-completo-de-campos)
-15. [Diagramas de Fluxo](#15-diagramas-de-fluxo)
-16. [Exemplos Práticos de Cálculo](#16-exemplos-práticos-de-cálculo)
-17. [Aplicação Operacional](#17-aplicação-operacional)
-18. [Dependências Técnicas](#18-dependências-técnicas)
-19. [Limitações Conhecidas](#19-limitações-conhecidas)
-20. [Evoluções Futuras](#20-evoluções-futuras)
-21. [Changelog](#21-changelog)
+11. [Ranking de Melhor Telefone por Cliente](#11-ranking-de-melhor-telefone-por-cliente)
+12. [Interpretação Operacional](#12-interpretação-operacional)
+13. [Tratamento de Nulls e Edge Cases](#13-tratamento-de-nulls-e-edge-cases)
+14. [Filtros e Escopo Temporal](#14-filtros-e-escopo-temporal)
+15. [Glossário Completo de Campos](#15-glossário-completo-de-campos)
+16. [Diagramas de Fluxo](#16-diagramas-de-fluxo)
+17. [Exemplos Práticos de Cálculo](#17-exemplos-práticos-de-cálculo)
+18. [Aplicação Operacional](#18-aplicação-operacional)
+19. [Dependências Técnicas](#19-dependências-técnicas)
+20. [Limitações Conhecidas](#20-limitações-conhecidas)
+21. [Evoluções Futuras](#21-evoluções-futuras)
+22. [Changelog](#22-changelog)
 
 ---
 
@@ -43,6 +43,10 @@ Este modelo tem como objetivo criar um **indicador numérico (0 a 100)** que est
 ### Pergunta que o modelo responde:
 
 > **"Dado este cliente e este número de telefone, qual a probabilidade de conseguirmos falar com ele?"**
+
+E, a partir da v3.2:
+
+> **"Dentre todos os telefones deste cliente, qual é o melhor número para discar?"**
 
 ### O que o modelo **NÃO** faz:
 
@@ -59,6 +63,7 @@ Este modelo tem como objetivo criar um **indicador numérico (0 a 100)** que est
 - **Aumento de eficiência da operação:** priorização inteligente da fila de discagem
 - **Melhoria da experiência do cliente:** menos ligações desnecessárias, redução de fadiga
 - **Otimização do discador:** melhor aproveitamento das posições de atendimento (PA)
+- **Seleção do melhor número:** para cada cliente com múltiplos telefones, o modelo indica qual deve ser discado primeiro *(novo v3.2)*
 
 ---
 
@@ -107,14 +112,24 @@ O modelo opera em **dois níveis hierárquicos** combinados, ambos com a **mesma
 
 > **Evolução v3.1:** Ambas as camadas agora possuem a **mesma estrutura simétrica** de 3 componentes (60% eficiência + 20% recência + 20% anti-fadiga), tornando o modelo mais coerente e incluindo o efeito de "descanso" do cliente como fator de probabilidade.
 
-### 2.3 Premissa de Blindagem
+### 2.3 Premissa de Ranking de Telefone — NOVO v3.2
+
+O ranking interno de telefones por cliente é calculado **exclusivamente com base no `score_telefone`**, e não no `score_final`.
+
+**Justificativa:** O `score_cliente` é **idêntico para todos os telefones de um mesmo cliente** (pois depende apenas de métricas globais do cliente). Logo, ordenar pelo `score_final` dentro de um cliente seria matematicamente equivalente a ordenar pelo `score_telefone`, porém semanticamente incorreto — o ranking deve responder a pergunta *"qual número tem maior chance de ser atendido?"*, que é exclusivamente uma qualidade do telefone.
+
+$$\text{score\_final} = 0.70 \times \text{score\_telefone} + \underbrace{0.30 \times \text{score\_cliente}}_{\text{constante para todos os tels. do mesmo cliente}}$$
+
+Portanto, dentro de um cliente, a ordem por `score_final` = ordem por `score_telefone`. Usar `score_telefone` diretamente é a abordagem **correta e transparente**.
+
+### 2.4 Premissa de Blindagem
 
 Todas as divisões e médias são protegidas contra:
 - Divisão por zero (`NULLIF` + `ISNULL`)
 - Registros sem conexão (`CASE WHEN ... ELSE 0`)
 - Clientes sem histórico (retornam score base, nunca NULL)
 
-### 2.4 Premissa de Granularidade
+### 2.5 Premissa de Granularidade
 
 O modelo opera no nível `(Cliente_id, Numero_Telefone)`. Um mesmo cliente pode ter **vários registros** — um para cada número de telefone distinto no histórico de ligações.
 
@@ -122,7 +137,7 @@ O modelo opera no nível `(Cliente_id, Numero_Telefone)`. Um mesmo cliente pode 
 
 ## 3. Arquitetura Geral
 
-O modelo é construído com **CTEs (Common Table Expressions)** em três etapas:
+O modelo é construído com **CTEs (Common Table Expressions)** em **quatro etapas** (v3.2 adicionou o CTE de ranking):
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -145,20 +160,26 @@ O modelo é construído com **CTEs (Common Table Expressions)** em três etapas:
 │  ├── attempts_30d_cli (soma global)                  │
 │  └── qtd_telefones_cli                               │
 ├─────────────────────────────────────────────────────┤
-│           SELECT FINAL                               │
+│           CTE 3: scores_calculados                   │
 │         (JOIN telefone × cliente)                    │
 │                                                      │
-│  Calcula:                                            │
 │  ├── score_telefone  (0 a 1)  ─── peso 70%          │
 │  │    ├── 60% answer_rate_tel                        │
 │  │    ├── 20% recência_tel                           │
 │  │    └── 20% (1 - fadiga_tel)                       │
 │  ├── score_cliente   (0 a 1)  ─── peso 30%          │
 │  │    ├── 60% answer_rate_cli                        │
-│  │    ├── 20% recência_cli         ← NOVO v3.1      │
+│  │    ├── 20% recência_cli         ← v3.1           │
 │  │    └── 20% (1 - fadiga_cli)                       │
 │  ├── score_final     (0 a 100)                      │
 │  └── classificacao_score (A/B/C/D/E)                │
+├─────────────────────────────────────────────────────┤
+│           CTE 4: ranking                 ← NOVO v3.2 │
+│         (PARTITION BY Cliente_id)                    │
+│                                                      │
+│  └── rank_telefone_cliente                           │
+│       ordenado por score_telefone DESC               │
+│       + critérios de desempate por telefone          │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -232,10 +253,10 @@ Cada linha do resultado representa **um par único** de cliente + telefone.
 | Cliente A (tel 1) + Cliente B (tel 1, mesmo número)| 2 registros       |
 
 **Implicação prática:** O score é **específico por número**. O mesmo cliente pode ter:
-- Telefone principal com score 85 (celular pessoal)
-- Telefone secundário com score 12 (telefone antigo)
+- Telefone principal com score 85 (celular pessoal) → `rank_telefone_cliente = 1`
+- Telefone secundário com score 12 (telefone antigo) → `rank_telefone_cliente = 2`
 
-Isso permite que a operação escolha **qual número discar** para cada cliente.
+Isso permite que a operação escolha **qual número discar** para cada cliente, usando o campo `melhor_telefone_cliente = 1` como filtro direto.
 
 ---
 
@@ -369,7 +390,7 @@ DATEDIFF(DAY, MAX(l.Dt_Ligacao), GETDATE())
 
 **Definição:** Dias corridos entre a última tentativa neste número e a data de execução.
 
-**Impacto direto no score_telefone (peso 20% — componente de recência):**
+**Impacto direto no score_telefone (peso 20% — componente de recência) e no ranking de desempate:**
 
 | Dias  | Faixa               | Fator de recência | Significado                               |
 | ----- | ------------------- | ----------------- | ----------------------------------------- |
@@ -388,7 +409,7 @@ SUM(CASE WHEN l.Dt_Ligacao >= DATEADD(DAY, -30, GETDATE()) THEN 1 ELSE 0 END)
 
 **Definição:** Tentativas de ligação nos últimos 30 dias **neste telefone específico**.
 
-**Impacto direto no score_telefone (peso 20% — componente de fadiga):**
+**Impacto direto no score_telefone (peso 20% — componente de fadiga) e no ranking de desempate:**
 
 | Tentativas 30d | Fator de fadiga | (1 - fadiga) | Significado                          |
 | --------------- | --------------- | ------------ | ------------------------------------ |
@@ -514,8 +535,6 @@ MIN(dias_desde_ultima_tel)
 | 14–29 | Contato recente     | 0.5               | Alguma chance de o cliente estar saturado        |
 | < 14  | Contato muito recente| 0.3              | Maior risco de rejeição por excesso de contato  |
 
-> **Novo na v3.1:** Esta métrica agora participa diretamente do cálculo do score_cliente, usando as mesmas faixas do nível telefone. Isso garante que clientes que não são contactados há mais tempo recebam um bônus de probabilidade.
-
 - Peso efetivo no score final: **6%** (0.20 × 0.30 × 100)
 
 ---
@@ -549,7 +568,7 @@ COUNT(*)
 
 **Definição:** Quantidade de telefones distintos do cliente no histórico.
 
-**Uso:** Métrica informativa. Clientes com mais telefones oferecem mais opções de contato.
+**Uso:** Métrica informativa. Clientes com mais telefones oferecem mais opções de contato. Também indica o range possível de `rank_telefone_cliente` (1 a `qtd_telefones_cli`).
 
 ---
 
@@ -583,16 +602,12 @@ fator_recencia_tel = CASE
 END
 ```
 
-Números com mais "descanso" recebem score maior. A lógica é baseada em **degraus** (não linear):
-
 | Faixa (dias)    | Valor | Razão                                  |
 | --------------- | ----- | -------------------------------------- |
 | ≥ 60            | 1.0   | Suficientemente descansado              |
 | 30–59           | 0.7   | Bom intervalo                           |
 | 14–29           | 0.5   | Intervalo aceitável                     |
 | < 14            | 0.3   | Contato muito recente, nunca zero       |
-
-**Por que nunca zero?** Mesmo um contato recente pode ser bem-sucedido. Zero eliminaria completamente a contribuição de recência, o que seria excessivamente pessimista.
 
 - Peso efetivo no score final: **14%** (0.20 × 0.70 × 100)
 
@@ -605,11 +620,7 @@ fator_fadiga_tel = CASE
     WHEN attempts_30d_tel >= 2 THEN 0.4
     ELSE 0.0
 END
-
-componente_fadiga = 1.0 - fator_fadiga_tel
 ```
-
-A penalização por fadiga é **subtraída de 1** para que menos pressão = mais score.
 
 | attempts_30d_tel | fator_fadiga | (1 - fadiga) | Efeito                    |
 | ---------------- | ------------ | ------------ | ------------------------- |
@@ -621,8 +632,6 @@ A penalização por fadiga é **subtraída de 1** para que menos pressão = mais
 - Peso efetivo no score final: **14%** (0.20 × 0.70 × 100)
 
 ### Tabela completa — Todos os cenários do score_telefone:
-
-O score_telefone varia entre **0.06** (pior caso teórico) e **1.00** (melhor caso).
 
 | answer_rate | recência | fadiga tel | score_telefone |
 | ----------- | -------- | ---------- | -------------- |
@@ -645,20 +654,14 @@ score_cliente = (0.60 × answer_rate_cli)
              + (0.20 × (1 - fator_fadiga_cli))
 ```
 
-> **Evolução v3.1:** A fórmula anterior era `0.70 × answer_rate_cli + 0.30 × (1 - fadiga)`. A nova versão inclui o fator de recência global do cliente, tornando a estrutura simétrica à do score_telefone.
-
 ### Componentes:
 
 #### 9.1 Componente 1: answer_rate_cli (60%)
 
-Taxa global de atendimento do cliente em todos os telefones.
-
 - Range: 0.0 a 1.0
 - Peso efetivo no score final: **18%** (0.60 × 0.30 × 100)
 
-**Por que 60%?** O comportamento estrutural do cliente é a informação mais valiosa no nível de cliente. Um cliente que historicamente atende em 40% das tentativas tem esse padrão independente do número.
-
-#### 9.2 Componente 2: Recência global (20%) — NOVO v3.1
+#### 9.2 Componente 2: Recência global (20%)
 
 ```sql
 fator_recencia_cli = CASE
@@ -669,20 +672,7 @@ fator_recencia_cli = CASE
 END
 ```
 
-Clientes que não são contactados há mais tempo recebem um bônus no score. As faixas são **idênticas** às do nível telefone:
-
-| Faixa (dias)    | Valor | Significado                                          |
-| --------------- | ----- | ---------------------------------------------------- |
-| ≥ 60            | 1.0   | Cliente descansado, máxima probabilidade de atender   |
-| 30–59           | 0.7   | Intervalo razoável                                    |
-| 14–29           | 0.5   | Contato recente, algum risco de saturação             |
-| < 14            | 0.3   | Contato muito recente em pelo menos um telefone       |
-
-**Justificativa:** Mesmo que o score_telefone já capture a recência do número específico, a recência global do cliente captura um efeito diferente — a **disposição geral do cliente** em atender. Um cliente que não é contactado há 60 dias (em nenhum telefone) está mais propenso a atender do que um que recebeu ligações ontem em outro número.
-
 - Peso efetivo no score final: **6%** (0.20 × 0.30 × 100)
-
-> **Nota:** Embora o peso efetivo de 6% pareça baixo, em cenários onde recência_tel e recência_cli divergem significativamente (ex.: telefone novo de um cliente muito trabalhado), esse componente tem impacto perceptível.
 
 #### 9.3 Componente 3: (1 - Fadiga global) (20%)
 
@@ -693,42 +683,9 @@ fator_fadiga_cli = CASE
     WHEN attempts_30d_cli >= 4  THEN 0.4
     ELSE 0.0
 END
-
-componente_fadiga_cli = 1.0 - fator_fadiga_cli
 ```
 
-| attempts_30d_cli | fator_fadiga | (1 - fadiga) | Efeito                         |
-| ---------------- | ------------ | ------------ | ------------------------------ |
-| 0–3              | 0.0          | **1.0**      | Score cheio                    |
-| 4–7              | 0.4          | **0.6**      | Penalização leve                |
-| 8–11             | 0.7          | **0.3**      | Penalização forte               |
-| ≥ 12             | 1.0          | **0.0**      | Score zerado neste componente  |
-
 - Peso efetivo no score final: **6%** (0.20 × 0.30 × 100)
-
-### Tabela completa — Todos os cenários do score_cliente:
-
-O score_cliente varia entre **0.06** (pior caso teórico) e **1.00** (melhor caso).
-
-| answer_rate_cli | recência_cli | fadiga_cli     | score_cliente |
-| --------------- | ------------ | -------------- | ------------- |
-| 0.50            | ≥60d (1.0)   | 0 tent (1.0)   | **0.70**     |
-| 0.50            | <14d (0.3)   | ≥12 tent (0.0) | **0.36**     |
-| 0.30            | 30d (0.7)    | 5 tent (0.6)   | **0.44**     |
-| 0.10            | ≥60d (1.0)   | 0 tent (1.0)   | **0.46**     |
-| 0.00            | <14d (0.3)   | ≥12 tent (0.0) | **0.06**     |
-| 1.00            | ≥60d (1.0)   | 0 tent (1.0)   | **1.00**     |
-
-**Exemplo de impacto da camada cliente (v3.1):**
-
-Imagine dois telefones com `answer_rate_tel = 0.30`, `dias_desde_ultima_tel = 45`, `attempts_30d_tel = 1`:
-
-| Cenário           | answer_rate_cli | dias_desde_cli | attempts_30d_cli | score_cliente | Efeito no final |
-| ----------------- | --------------- | -------------- | ---------------- | ------------- | --------------- |
-| Cliente receptivo | 0.45            | 45             | 2                | 0.61          | +18.3 pontos    |
-| Cliente arredio   | 0.05            | 3              | 10               | 0.12          | +3.6 pontos     |
-
-Diferença de **≈15 pontos** no score final, mesmo com o mesmo telefone!
 
 ---
 
@@ -740,42 +697,17 @@ Diferença de **≈15 pontos** no score final, mesmo com o mesmo telefone!
 Score_Final = (0.70 × Score_Telefone + 0.30 × Score_Cliente) × 100
 ```
 
-### Desdobramento completo (v3.1):
-
-```
-Score_Final = 100 × [
-    0.70 × (
-        0.60 × answer_rate_tel                    ← 42% peso efetivo
-      + 0.20 × fator_recencia_tel                 ← 14% peso efetivo
-      + 0.20 × (1 - fator_fadiga_tel)             ← 14% peso efetivo
-    )
-  + 0.30 × (
-        0.60 × answer_rate_cli                    ← 18% peso efetivo
-      + 0.20 × fator_recencia_cli                 ←  6% peso efetivo  ← NOVO v3.1
-      + 0.20 × (1 - fator_fadiga_cli)             ←  6% peso efetivo
-    )
-]
-```
-
 ### Mapa de pesos efetivos (v3.1):
 
-| #  | Variável                | Camada   | Peso interno | Peso camada | **Peso efetivo** | Δ vs v3.0  |
-| -- | ----------------------- | -------- | ------------ | ----------- | ---------------- | ---------- |
-| 1  | `answer_rate_tel`       | Telefone | 60%          | 70%         | **42.0%**        | =          |
-| 2  | `fator_recencia_tel`    | Telefone | 20%          | 70%         | **14.0%**        | =          |
-| 3  | `(1-fadiga_tel)`        | Telefone | 20%          | 70%         | **14.0%**        | =          |
-| 4  | `answer_rate_cli`       | Cliente  | 60%          | 30%         | **18.0%**        | era 21.0%  |
-| 5  | `fator_recencia_cli`    | Cliente  | 20%          | 30%         | **6.0%**         | **NOVO**   |
-| 6  | `(1-fadiga_cli)`        | Cliente  | 20%          | 30%         | **6.0%**         | era 9.0%   |
-|    |                         |          |              | **TOTAL:**  | **100.0%**       |            |
-
-> **Comparação v3.0 → v3.1:** O `answer_rate_cli` perdeu 3 p.p. (de 21% para 18%) e a fadiga_cli perdeu 3 p.p. (de 9% para 6%) para acomodar os 6% do novo componente de recência. A camada telefone permanece inalterada.
-
-### Range:
-
-| Mínimo | Máximo | Unidade |
-| ------ | ------ | ------- |
-| 0      | 100    | Pontos  |
+| #  | Variável                | Camada   | Peso interno | Peso camada | **Peso efetivo** |
+| -- | ----------------------- | -------- | ------------ | ----------- | ---------------- |
+| 1  | `answer_rate_tel`       | Telefone | 60%          | 70%         | **42.0%**        |
+| 2  | `fator_recencia_tel`    | Telefone | 20%          | 70%         | **14.0%**        |
+| 3  | `(1-fadiga_tel)`        | Telefone | 20%          | 70%         | **14.0%**        |
+| 4  | `answer_rate_cli`       | Cliente  | 60%          | 30%         | **18.0%**        |
+| 5  | `fator_recencia_cli`    | Cliente  | 20%          | 30%         | **6.0%**         |
+| 6  | `(1-fadiga_cli)`        | Cliente  | 20%          | 30%         | **6.0%**         |
+|    |                         |          |              | **TOTAL:**  | **100.0%**       |
 
 ### Classificação automática (na query):
 
@@ -791,9 +723,51 @@ END AS classificacao_score
 
 ---
 
-## 11. Interpretação Operacional
+## 11. Ranking de Melhor Telefone por Cliente
 
-### 11.1 Faixas de Score
+### NOVO v3.2
+
+O CTE `ranking` atribui a cada telefone sua posição dentro do cliente, identificando qual número tem maior probabilidade de ser atendido.
+
+### Campos gerados:
+
+| Campo                    | Tipo | Range | Descrição                                              |
+| ------------------------ | ---- | ----- | ------------------------------------------------------ |
+| `rank_telefone_cliente`  | INT  | ≥ 1   | Posição do telefone no cliente (1 = melhor)             |
+| `melhor_telefone_cliente`| BIT  | 0 / 1 | Flag: 1 indica o telefone com maior `score_telefone`   |
+
+### Lógica de ordenação:
+
+O ranking é calculado por `ROW_NUMBER() OVER (PARTITION BY Cliente_id ORDER BY ...)` usando **exclusivamente métricas de telefone**, em cascata:
+
+```sql
+ORDER BY
+    score_telefone        DESC,   -- 1º: score principal do número
+    answer_rate_tel       DESC,   -- 2º: desempata pela maior taxa histórica
+    attempts_30d_tel      ASC,    -- 3º: prefere o menos pressionado recentemente
+    dias_desde_ultima_tel DESC,   -- 4º: prefere o mais descansado
+    total_attempts_tel    DESC    -- 5º: prefere amostra maior (taxa mais confiável)
+```
+
+### Por que não usar `score_final` para o ranking?
+
+O `score_cliente` é **idêntico para todos os telefones do mesmo cliente** (deriva apenas de métricas globais agregadas do cliente). Portanto, dentro de um mesmo cliente:
+
+$$\text{ordem por score\_final} \equiv \text{ordem por score\_telefone}$$
+
+Usar `score_telefone` é matematicamente equivalente, porém **semanticamente correto** — o ranking responde à pergunta *"qual número tem maior chance de ser atendido?"*, que é uma qualidade exclusiva do telefone, não do cliente.
+
+### Comportamento em empate:
+
+`ROW_NUMBER()` sempre atribui posições únicas. Em empate de `score_telefone`, os critérios de desempate resolvem em cascata. Se dois números tiverem todos os 5 critérios idênticos, a ordem é determinística mas arbitrária.
+
+> Trocar `ROW_NUMBER()` por `RANK()` caso queira que dois números com `score_telefone` exatamente igual compartilhem a mesma posição (e o próximo receba `rank = N+2`).
+
+---
+
+## 12. Interpretação Operacional
+
+### 12.1 Faixas de Score
 
 | Score    | Class. | Cor       | Ação recomendada                                      |
 | -------- | ------ | --------- | ----------------------------------------------------- |
@@ -803,7 +777,7 @@ END AS classificacao_score
 | 20 – 39  | D      | 🔴 Verm.  | Baixa prioridade; usar apenas se fila estiver vazia   |
 | 0 – 19   | E      | ⚫ Crítico | Considerar exclusão temporária ou permanente          |
 
-### 11.2 Perfis Típicos de Número
+### 12.2 Perfis Típicos de Número
 
 | Perfil                        | answer_rate_tel | answer_rate_cli | fadiga | Score aprox. |
 | ----------------------------- | --------------- | --------------- | ------ | ------------ |
@@ -813,16 +787,7 @@ END AS classificacao_score
 | Número antigo, sem resposta   | 0.02            | 0.10            | alta   | 5–15         |
 | Número novo, sem histórico    | 0.00            | 0.40            | baixa  | 18–22*       |
 
-*Números sem histórico próprio se beneficiam do score_cliente (se o cliente é receptivo). Isso é uma vantagem da arquitetura de dois níveis.
-
-### 11.3 Uso na Priorização de Discagem
-
-```sql
-SELECT *
-FROM resultado_score
-WHERE classificacao_score IN ('A - Alta Probabilidade', 'B - Boa Probabilidade')
-ORDER BY score_final DESC
-```
+### 12.3 Uso na Priorização de Discagem
 
 | Capacidade da PA | Corte sugerido | Classes incluídas |
 | ---------------- | -------------- | ----------------- |
@@ -833,55 +798,50 @@ ORDER BY score_final DESC
 
 ---
 
-## 12. Tratamento de Nulls e Edge Cases
+## 13. Tratamento de Nulls e Edge Cases
 
-### 12.1 Divisão por Zero
+### 13.1 Divisão por Zero
 
-| Métrica            | Situação de risco          | Proteção aplicada                        | Resultado |
-| ------------------ | -------------------------- | ---------------------------------------- | --------- |
-| `answer_rate_tel`  | `total_attempts_tel = 0`   | `NULLIF(COUNT(...), 0)` + `ISNULL(..., 0)` | 0.0    |
-| `cpc_rate_tel`     | `total_answered_tel = 0`   | `NULLIF(SUM(...), 0)` + `ISNULL(..., 0)`   | 0.0    |
-| `answer_rate_cli`  | `total_attempts_cli = 0`   | `NULLIF(SUM(...), 0)` + `ISNULL(..., 0)`   | 0.0    |
+| Métrica            | Situação de risco          | Proteção aplicada                          | Resultado |
+| ------------------ | -------------------------- | ------------------------------------------ | --------- |
+| `answer_rate_tel`  | `total_attempts_tel = 0`   | `NULLIF(COUNT(...), 0)` + `ISNULL(..., 0)` | 0.0       |
+| `cpc_rate_tel`     | `total_answered_tel = 0`   | `NULLIF(SUM(...), 0)` + `ISNULL(..., 0)`   | 0.0       |
+| `answer_rate_cli`  | `total_attempts_cli = 0`   | `NULLIF(SUM(...), 0)` + `ISNULL(..., 0)`   | 0.0       |
 
-### 12.2 Médias com Dados Ausentes
-
-| Métrica                    | Situação               | Proteção               | Resultado |
-| -------------------------- | ---------------------- | ---------------------- | --------- |
-| `avg_duracao_conectado_tel`| Nenhuma conexão        | `ISNULL(AVG(...), 0)`  | 0         |
-
-### 12.3 Score Final
+### 13.2 Score Final
 
 Todos os componentes são protegidos. O `score_final` **nunca será NULL**. Valor mínimo possível = **0**.
 
-### 12.4 Edge Cases
+### 13.3 Edge Cases
 
-| Caso                                        | Comportamento                                                  |
-| ------------------------------------------- | -------------------------------------------------------------- |
-| Cliente com 0 tentativas                     | Não aparece no resultado (filtrado pelo GROUP BY)               |
-| Tel com 1 tentativa, não atendida            | answer_rate_tel=0, score ≈ (recência + fadiga) × 14 + cli × 30|
-| Tel com 1 tentativa, atendida + CPC          | answer_rate_tel=1, score alto (se cliente também bom)          |
-| Cliente com 1 telefone                       | answer_rate_cli = answer_rate_tel (métricas idênticas)          |
-| `Duracao_Conectado` NULL em ligação conectada| AVG ignora NULLs, não afeta o cálculo                          |
-| Telefone compartilhado entre 2 clientes      | Tratado como 2 registros independentes (granularidade inclui Cliente_id) |
+| Caso                                        | Comportamento                                                             |
+| ------------------------------------------- | ------------------------------------------------------------------------- |
+| Cliente com 0 tentativas                     | Não aparece no resultado (filtrado pelo GROUP BY)                          |
+| Cliente com apenas 1 telefone                | `rank_telefone_cliente = 1` e `melhor_telefone_cliente = 1` para o único  |
+| Tel com 1 tentativa, não atendida            | answer_rate_tel=0, score ≈ (recência + fadiga) × 14 + cli × 30           |
+| Tel com 1 tentativa, atendida + CPC          | answer_rate_tel=1, score alto (se cliente também bom)                     |
+| Dois telefones com score_telefone idêntico   | `ROW_NUMBER()` desempata pelos critérios secundários (answer_rate, etc.)  |
+| `Duracao_Conectado` NULL em ligação conectada| AVG ignora NULLs, não afeta o cálculo                                     |
+| Telefone compartilhado entre 2 clientes      | Tratado como 2 registros independentes (granularidade inclui Cliente_id)  |
 
 ---
 
-## 13. Filtros e Escopo Temporal
+## 14. Filtros e Escopo Temporal
 
-### 13.1 Filtro Principal
+### 14.1 Filtro Principal
 
 ```sql
-WHERE l.Dt_Ligacao >= '2026-02-10'
+WHERE l.Dt_Ligacao >= '2026-01-01'
 ```
 
-**Impacto:** Limita a análise a ligações a partir de 10/fev/2026.
+**Impacto:** Limita a análise a ligações a partir de 01/jan/2026.
 
 **Recomendação de evolução:**
 ```sql
 WHERE l.Dt_Ligacao >= DATEADD(MONTH, -6, GETDATE())
 ```
 
-### 13.2 Janela de 30 Dias
+### 14.2 Janela de 30 Dias
 
 ```sql
 l.Dt_Ligacao >= DATEADD(DAY, -30, GETDATE())
@@ -891,45 +851,49 @@ Janela **deslizante** calculada dinamicamente a cada execução.
 
 ---
 
-## 14. Glossário Completo de Campos
+## 15. Glossário Completo de Campos
 
 ### Campos retornados no SELECT final:
 
-| Campo                        | Camada   | Tipo    | Range     | Descrição                                        |
-| ---------------------------- | -------- | ------- | --------- | ------------------------------------------------ |
-| `Cliente_id`                 | —        | INT     | —         | FK do cliente                                    |
-| `Numero_Telefone`            | —        | VARCHAR | —         | Número discado                                   |
-| `total_attempts_tel`         | Telefone | INT     | ≥ 1       | Total de tentativas no telefone                  |
-| `total_answered_tel`         | Telefone | INT     | 0 a N     | Total de conexões no telefone                    |
-| `total_cpc_tel`              | Telefone | INT     | 0 a N     | Total de CPC no telefone                         |
-| `answer_rate_tel`            | Telefone | FLOAT   | 0.0–1.0   | Taxa de atendimento do telefone                  |
-| `cpc_rate_tel`               | Telefone | FLOAT   | 0.0–1.0   | Taxa de CPC sobre conexões do telefone           |
-| `primeira_ligacao_tel`       | Telefone | DATETIME| —         | Data da primeira tentativa                       |
-| `ultima_ligacao_tel`         | Telefone | DATETIME| —         | Data da última tentativa                         |
-| `dias_desde_ultima_tel`      | Telefone | INT     | ≥ 0       | Dias desde última tentativa no telefone          |
-| `attempts_30d_tel`           | Telefone | INT     | 0 a N     | Tentativas 30d no telefone                       |
-| `answered_30d_tel`           | Telefone | INT     | 0 a N     | Conexões 30d no telefone                         |
-| `distinct_campaigns`         | Telefone | INT     | ≥ 1       | Campanhas distintas                              |
-| `distinct_mailings`          | Telefone | INT     | ≥ 1       | Mailings distintos                               |
-| `avg_duracao_conectado_tel`  | Telefone | FLOAT   | ≥ 0       | Duração média conectada (seg)                    |
-| `total_attempts_cli`         | Cliente  | INT     | ≥ 1       | Total tentativas global                          |
-| `total_answered_cli`         | Cliente  | INT     | 0 a N     | Total conexões global                            |
-| `total_cpc_cli`              | Cliente  | INT     | 0 a N     | Total CPC global                                 |
-| `answer_rate_cli`            | Cliente  | FLOAT   | 0.0–1.0   | Taxa de atendimento global                       |
-| `dias_desde_ultima_cli`      | Cliente  | INT     | ≥ 0       | Dias desde último contato global                 |
-| `attempts_30d_cli`           | Cliente  | INT     | 0 a N     | Tentativas 30d global                            |
-| `answered_30d_cli`           | Cliente  | INT     | 0 a N     | Conexões 30d global                              |
-| `qtd_telefones_cli`          | Cliente  | INT     | ≥ 1       | Quantidade de telefones do cliente               |
-| `score_telefone`             | Score    | FLOAT   | 0.0–1.0   | Score de eficiência do número                    |
-| `score_cliente`              | Score    | FLOAT   | 0.0–1.0   | Score de comportamento do cliente                |
-| `score_final`                | Score    | FLOAT   | 0–100     | **Score final de probabilidade de contato**      |
-| `classificacao_score`        | Score    | VARCHAR | A/B/C/D/E | Classificação textual                            |
+| Campo                        | Camada   | Tipo    | Range     | Descrição                                                    |
+| ---------------------------- | -------- | ------- | --------- | ------------------------------------------------------------ |
+| `Cliente_id`                 | —        | INT     | —         | FK do cliente                                                |
+| `Numero_Telefone`            | —        | VARCHAR | —         | Número discado                                               |
+| `rank_telefone_cliente`      | Ranking  | INT     | ≥ 1       | **Posição do telefone no cliente (1 = melhor score_telefone)**|
+| `melhor_telefone_cliente`    | Ranking  | BIT     | 0 / 1     | **Flag: 1 = telefone com maior score_telefone do cliente**   |
+| `total_attempts_tel`         | Telefone | INT     | ≥ 1       | Total de tentativas no telefone                              |
+| `total_answered_tel`         | Telefone | INT     | 0 a N     | Total de conexões no telefone                                |
+| `total_cpc_tel`              | Telefone | INT     | 0 a N     | Total de CPC no telefone                                     |
+| `answer_rate_tel`            | Telefone | FLOAT   | 0.0–1.0   | Taxa de atendimento do telefone                              |
+| `cpc_rate_tel`               | Telefone | FLOAT   | 0.0–1.0   | Taxa de CPC sobre conexões do telefone                       |
+| `primeira_ligacao_tel`       | Telefone | DATETIME| —         | Data da primeira tentativa                                   |
+| `ultima_ligacao_tel`         | Telefone | DATETIME| —         | Data da última tentativa                                     |
+| `dias_desde_ultima_tel`      | Telefone | INT     | ≥ 0       | Dias desde última tentativa no telefone                      |
+| `attempts_30d_tel`           | Telefone | INT     | 0 a N     | Tentativas 30d no telefone                                   |
+| `answered_30d_tel`           | Telefone | INT     | 0 a N     | Conexões 30d no telefone                                     |
+| `distinct_campaigns`         | Telefone | INT     | ≥ 1       | Campanhas distintas                                          |
+| `distinct_mailings`          | Telefone | INT     | ≥ 1       | Mailings distintos                                           |
+| `avg_duracao_conectado_tel`  | Telefone | FLOAT   | ≥ 0       | Duração média conectada (seg)                                |
+| `total_attempts_cli`         | Cliente  | INT     | ≥ 1       | Total tentativas global                                      |
+| `total_answered_cli`         | Cliente  | INT     | 0 a N     | Total conexões global                                        |
+| `total_cpc_cli`              | Cliente  | INT     | 0 a N     | Total CPC global                                             |
+| `answer_rate_cli`            | Cliente  | FLOAT   | 0.0–1.0   | Taxa de atendimento global                                   |
+| `dias_desde_ultima_cli`      | Cliente  | INT     | ≥ 0       | Dias desde último contato global                             |
+| `attempts_30d_cli`           | Cliente  | INT     | 0 a N     | Tentativas 30d global                                        |
+| `answered_30d_cli`           | Cliente  | INT     | 0 a N     | Conexões 30d global                                          |
+| `qtd_telefones_cli`          | Cliente  | INT     | ≥ 1       | Quantidade de telefones do cliente                           |
+| `score_telefone`             | Score    | FLOAT   | 0.0–1.0   | Score de eficiência do número                                |
+| `score_cliente`              | Score    | FLOAT   | 0.0–1.0   | Score de comportamento do cliente                            |
+| `score_final`                | Score    | FLOAT   | 0–100     | **Score final de probabilidade de contato**                  |
+| `classificacao_score`        | Score    | VARCHAR | A/B/C/D/E | Classificação textual                                        |
+
+> Os campos `rank_telefone_cliente` e `melhor_telefone_cliente` aparecem **logo após `Numero_Telefone`** no SELECT, antes das métricas brutas, para facilitar filtragem direta.
 
 ---
 
-## 15. Diagramas de Fluxo
+## 16. Diagramas de Fluxo
 
-### 15.1 Fluxo de Dados
+### 16.1 Fluxo de Dados (v3.2)
 
 ```
 ┌──────────┐     LEFT JOIN     ┌──────────────────┐
@@ -937,7 +901,7 @@ Janela **deslizante** calculada dinamicamente a cada execução.
 │          │  ON Tipo_Processo  │ (campo_aux=2126) │
 └────┬─────┘                   └──────────────────┘
      │
-     │  WHERE Dt_Ligacao >= '2026-02-10'
+     │  WHERE Dt_Ligacao >= '2026-01-01'
      │
      ▼
 ┌────────────────────────────────┐
@@ -966,42 +930,75 @@ Janela **deslizante** calculada dinamicamente a cada execução.
      │                   │
      ▼                   ▼
 ┌────────────────────────────────┐
-│    SELECT FINAL (JOIN)         │
-│    tel.Cliente_id = cli.       │
+│  CTE 3: scores_calculados      │
+│  JOIN telefone × cliente       │
 │                                │
 │  ► score_telefone   (0–1)      │
-│    60% answer + 20% rec + 20% │
-│    (1-fad)                     │
 │  ► score_cliente    (0–1)      │
-│    60% answer + 20% rec + 20% │
-│    (1-fad)        ← SIMÉTRICO │
 │  ► score_final      (0–100)    │
 │  ► classificacao    (A-E)      │
+└──────────┬─────────────────────┘
+           │
+           ▼
+┌────────────────────────────────┐    ← NOVO v3.2
+│  CTE 4: ranking                │
+│  PARTITION BY Cliente_id       │
+│  ORDER BY score_telefone DESC  │
+│  + 4 critérios de desempate    │
+│                                │
+│  ► rank_telefone_cliente       │
+└──────────┬─────────────────────┘
+           │
+           ▼
+┌────────────────────────────────┐
+│  SELECT FINAL                  │
+│                                │
+│  ► rank_telefone_cliente       │
+│  ► melhor_telefone_cliente     │
+│  ► [todas as métricas]         │
+│  ► score_telefone              │
+│  ► score_cliente               │
+│  ► score_final                 │
+│  ► classificacao_score         │
 └────────────────────────────────┘
 ```
 
-### 15.2 Composição do Score Final (v3.1)
+### 16.2 Composição do Score Final (v3.1)
 
 ```
 score_final (0-100) = 100 × [
 │
-├── 70% ─── score_telefone
+├── 70% ─── score_telefone  ◄── BASE do ranking de melhor telefone (v3.2)
 │           ├── 60% ── answer_rate_tel ──────── total_answered_tel / total_attempts_tel
 │           ├── 20% ── fator_recencia_tel ───── f(dias_desde_ultima_tel) [0.3–1.0]
 │           └── 20% ── (1 - fadiga_tel) ────── 1 - f(attempts_30d_tel) [0.0–1.0]
 │
-└── 30% ─── score_cliente
+└── 30% ─── score_cliente   ◄── idêntico para todos os tels. do mesmo cliente
             ├── 60% ── answer_rate_cli ──────── total_answered_cli / total_attempts_cli
-            ├── 20% ── fator_recencia_cli ───── f(dias_desde_ultima_cli) [0.3–1.0]  ← NOVO v3.1
+            ├── 20% ── fator_recencia_cli ───── f(dias_desde_ultima_cli) [0.3–1.0]
             └── 20% ── (1 - fadiga_cli) ────── 1 - f(attempts_30d_cli) [0.0–1.0]
 ]
 ```
 
-> **Simetria v3.1:** Ambas as camadas possuem a mesma estrutura de 3 componentes (60/20/20), facilitando a interpretação e manutenção do modelo.
+### 16.3 Lógica do Ranking de Telefone (v3.2)
+
+```
+Para cada Cliente_id:
+
+  Tel A: score_telefone = 0.64  →  rank = 1  ✓ melhor_telefone_cliente = 1
+  Tel B: score_telefone = 0.44  →  rank = 2
+  Tel C: score_telefone = 0.22  →  rank = 3
+
+  Em empate de score_telefone:
+    → desempata por answer_rate_tel DESC
+    → depois por attempts_30d_tel ASC
+    → depois por dias_desde_ultima_tel DESC
+    → depois por total_attempts_tel DESC
+```
 
 ---
 
-## 16. Exemplos Práticos de Cálculo
+## 17. Exemplos Práticos de Cálculo
 
 ### Exemplo 1: Cliente receptivo, celular principal, sem fadiga
 
@@ -1013,8 +1010,6 @@ score_final (0-100) = 100 × [
 | answer_rate_cli           | 0.42   | Cliente  |
 | dias_desde_ultima_cli     | 45     | Cliente  |
 | attempts_30d_cli          | 3      | Cliente  |
-
-**Cálculo:**
 
 ```
 Score Telefone:
@@ -1037,182 +1032,175 @@ Score Final:
 
 ### Exemplo 2: Número improdutivo de cliente arredio, alta fadiga
 
-| Métrica                   | Valor  | Camada   |
-| ------------------------- | ------ | -------- |
-| answer_rate_tel           | 0.03   | Telefone |
-| dias_desde_ultima_tel     | 5      | Telefone |
-| attempts_30d_tel          | 7      | Telefone |
-| answer_rate_cli           | 0.08   | Cliente  |
-| dias_desde_ultima_cli     | 2      | Cliente  |
-| attempts_30d_cli          | 14     | Cliente  |
-
-**Cálculo:**
+| Métrica                   | Valor  |
+| ------------------------- | ------ |
+| answer_rate_tel           | 0.03   |
+| dias_desde_ultima_tel     | 5      |
+| attempts_30d_tel          | 7      |
+| answer_rate_cli           | 0.08   |
+| dias_desde_ultima_cli     | 2      |
+| attempts_30d_cli          | 14     |
 
 ```
-Score Telefone:
-  = (0.60 × 0.03)  +  (0.20 × 0.3)  +  (0.20 × (1 - 1.0))
-  =  0.018          +   0.06          +   0.00
-  =  0.078
-
-Score Cliente (v3.1):
-  = (0.60 × 0.08)  +  (0.20 × 0.3)  +  (0.20 × (1 - 1.0))
-  =  0.048          +   0.06          +   0.00
-  =  0.108
-
-Score Final:
-  = (0.70 × 0.078  +  0.30 × 0.108) × 100
-  = (0.055 + 0.032) × 100
-  = 8.7  →  Classificação E (Muito Baixa)
+Score Telefone = 0.018 + 0.06 + 0.00 = 0.078
+Score Cliente  = 0.048 + 0.06 + 0.00 = 0.108
+Score Final    = (0.70×0.078 + 0.30×0.108) × 100 = 8.7  →  E (Muito Baixa)
 ```
 
 ---
 
-### Exemplo 3: Número novo, cliente receptivo (benefício da camada cliente)
-
-| Métrica                   | Valor  | Camada   |
-| ------------------------- | ------ | -------- |
-| answer_rate_tel           | 0.00   | Telefone |
-| dias_desde_ultima_tel     | 2      | Telefone |
-| attempts_30d_tel          | 1      | Telefone |
-| answer_rate_cli           | 0.45   | Cliente  |
-| dias_desde_ultima_cli     | 2      | Cliente  |
-| attempts_30d_cli          | 3      | Cliente  |
-
-**Cálculo:**
+### Exemplo 3: Número novo, cliente receptivo
 
 ```
-Score Telefone:
-  = (0.60 × 0.00)  +  (0.20 × 0.3)  +  (0.20 × (1 - 0.0))
-  =  0.00           +   0.06          +   0.20
-  =  0.26
-
-Score Cliente (v3.1):
-  = (0.60 × 0.45)  +  (0.20 × 0.3)  +  (0.20 × (1 - 0.0))
-  =  0.27           +   0.06          +   0.20
-  =  0.53
-
-Score Final:
-  = (0.70 × 0.26  +  0.30 × 0.53) × 100
-  = (0.182 + 0.159) × 100
-  = 34.1  →  Classificação D (Baixa)
+Score Telefone = 0.00 + 0.06 + 0.20 = 0.26
+Score Cliente  = 0.27 + 0.06 + 0.20 = 0.53
+Score Final    = (0.70×0.26 + 0.30×0.53) × 100 = 34.1  →  D (Baixa)
 ```
 
 **Leitura:** Sem a camada cliente, este número teria ~18 pontos. A camada cliente adicionou ~16 pontos porque o cliente é receptivo.
 
 ---
 
-### Exemplo 4: Mesmo telefone, dois clientes diferentes
+### Exemplo 4: Mesmo cliente, dois telefones — ranking aplicado (NOVO v3.2)
 
-Demonstra como a camada cliente diferencia o mesmo padrão de telefone:
+Demonstra como o ranking seleciona o melhor número para discar:
 
-| Métrica              | Cliente A (receptivo)  | Cliente B (arredio)    |
-| -------------------- | ---------------------- | ---------------------- |
-| answer_rate_tel      | 0.25                   | 0.25                   |
-| dias_desde_ultima_tel| 30                     | 30                     |
-| attempts_30d_tel     | 2                      | 2                      |
-| **answer_rate_cli**  | **0.40**               | **0.05**               |
-| **dias_desde_ult_cli**| **30**                | **3**                  |
-| **attempts_30d_cli** | **4**                  | **9**                  |
+| Campo                    | Tel 1 (celular) | Tel 2 (fixo antigo) |
+| ------------------------ | --------------- | ------------------- |
+| answer_rate_tel          | 0.40            | 0.05                |
+| dias_desde_ultima_tel    | 35              | 10                  |
+| attempts_30d_tel         | 1               | 3                   |
+| **score_telefone**       | **0.62**        | **0.15**            |
+| answer_rate_cli          | 0.30            | 0.30                |
+| dias_desde_ultima_cli    | 10              | 10                  |
+| attempts_30d_cli         | 4               | 4                   |
+| **score_cliente**        | **0.42**        | **0.42** (idêntico) |
+| **score_final**          | **54.0**        | **23.1**            |
+| **rank_telefone_cliente**| **1**           | **2**               |
+| **melhor_telefone_cliente**| **1**         | **0**               |
 
-```
-                     Cliente A                    Cliente B
-Score Telefone:      0.39                         0.39       (idênticos)
-
-Score Cliente (v3.1):
-  A: (0.60×0.40) + (0.20×0.7) + (0.20×0.6) = 0.24 + 0.14 + 0.12 = 0.50
-  B: (0.60×0.05) + (0.20×0.3) + (0.20×0.3) = 0.03 + 0.06 + 0.06 = 0.15
-
-Score Final:        (0.70×0.39+0.30×0.50)×100   (0.70×0.39+0.30×0.15)×100
-                   = 42.3                        = 31.8
-Classificação:       C (Moderada)                 D (Baixa)
-```
-
-**Diferença de ~10.5 pontos** — e uma mudança de classificação — por causa do comportamento histórico e recência do cliente.
+**Leitura:**
+- `score_cliente` é idêntico (0.42) para ambos — confirmando que não diferencia os telefones
+- O ranking por `score_telefone` corretamente elege o celular como número a discar
+- Filtrar `WHERE melhor_telefone_cliente = 1` retorna apenas o Tel 1 para este cliente
 
 ---
 
-### Exemplo 5 (NOVO v3.1): Impacto isolado da recência do cliente
+### Exemplo 5: Impacto isolado da recência do cliente
 
-Demonstra como a recência global do cliente afeta o score quando tudo mais é igual:
-
-| Métrica              | Cenário A (desc. longo) | Cenário B (cont. recente) |
-| -------------------- | ----------------------- | ------------------------- |
-| answer_rate_tel      | 0.30                    | 0.30                      |
-| dias_desde_ultima_tel| 40                      | 40                        |
-| attempts_30d_tel     | 0                       | 0                         |
-| answer_rate_cli      | 0.30                    | 0.30                      |
-| **dias_desde_ult_cli**| **65**                 | **5**                     |
-| attempts_30d_cli     | 0                       | 0                         |
+| Métrica                  | Cenário A (desc. longo) | Cenário B (cont. recente) |
+| ------------------------ | ----------------------- | ------------------------- |
+| answer_rate_tel          | 0.30                    | 0.30                      |
+| dias_desde_ultima_tel    | 40                      | 40                        |
+| attempts_30d_tel         | 0                       | 0                         |
+| answer_rate_cli          | 0.30                    | 0.30                      |
+| **dias_desde_ult_cli**   | **65**                  | **5**                     |
+| attempts_30d_cli         | 0                       | 0                         |
 
 ```
-Score Telefone (igual em ambos):
-  = (0.60 × 0.30) + (0.20 × 0.7) + (0.20 × 1.0)
-  = 0.18 + 0.14 + 0.20 = 0.52
+Score Telefone (igual): 0.52
+Score Cliente A: 0.18 + 0.20 + 0.20 = 0.58
+Score Cliente B: 0.18 + 0.06 + 0.20 = 0.44
 
-Score Cliente A: (0.60 × 0.30) + (0.20 × 1.0) + (0.20 × 1.0)
-              = 0.18 + 0.20 + 0.20 = 0.58
-
-Score Cliente B: (0.60 × 0.30) + (0.20 × 0.3) + (0.20 × 1.0)
-              = 0.18 + 0.06 + 0.20 = 0.44
-
-Score Final A: (0.70 × 0.52 + 0.30 × 0.58) × 100 = 53.8  →  C (Moderada)
-Score Final B: (0.70 × 0.52 + 0.30 × 0.44) × 100 = 49.6  →  C (Moderada)
-
+Score Final A: 53.8  →  C (Moderada)
+Score Final B: 49.6  →  C (Moderada)
 Δ = 4.2 pontos — apenas por recência do cliente
 ```
 
-**Leitura:** O componente de recência_cli sozinho pode contribuir com até ~4 pontos de diferença. Em cenários limítrofes (perto de 40, 60 ou 80), isso pode mudar a classificação.
-
 ---
 
-## 17. Aplicação Operacional
+## 18. Aplicação Operacional
 
-### 17.1 Fluxo de Uso
+### 18.1 Fluxo de Uso (v3.2)
 
 ```
 1. Execução da query (diária ou sob demanda)
          │
          ▼
-2. Resultado com score_final + classificação
+2. Resultado com score_final + classificação + ranking
          │
          ▼
-3. Filtro por classificação (A, B, C...)
+3a. Filtro por melhor_telefone_cliente = 1
+    (1 linha por cliente — melhor número)
+         │
+         ├── 3b. OU filtro por rank_telefone_cliente <= N
+         │       (Top-N números por cliente)
          │
          ▼
-4. ORDER BY score_final DESC
+4. Filtro adicional por classificacao_score (A, B, C...)
          │
          ▼
-5. Alimentação do discador / envio HSM
+5. ORDER BY score_final DESC
          │
          ▼
-6. Monitoramento de hit rate por faixa
+6. Alimentação do discador / envio HSM
          │
          ▼
-7. Retroalimentação e ajuste de pesos (futuro)
+7. Monitoramento de hit rate por faixa
+         │
+         ▼
+8. Retroalimentação e ajuste de pesos (futuro)
 ```
 
-### 17.2 Integração com HSM Prestamista
+### 18.2 Consultas Operacionais Prontas
 
-O modelo complementa o processo HSM via `MTE_RESUMO`:
+```sql
+-- 1. Melhor telefone de cada cliente (1 linha por cliente):
+SELECT *
+FROM ranking
+WHERE melhor_telefone_cliente = 1
+ORDER BY score_final DESC;
+
+-- 2. Top-2 telefones por cliente (fallback se principal não atender):
+SELECT *
+FROM ranking
+WHERE rank_telefone_cliente <= 2
+ORDER BY Cliente_id, rank_telefone_cliente;
+
+-- 3. Melhor telefone, apenas classes A e B (fila de alta prioridade):
+SELECT *
+FROM ranking
+WHERE melhor_telefone_cliente = 1
+  AND classificacao_score IN ('A - Alta Probabilidade', 'B - Boa Probabilidade')
+ORDER BY score_final DESC;
+
+-- 4. Clientes com múltiplos telefones e grande diferença entre o 1º e 2º:
+SELECT r1.Cliente_id,
+       r1.Numero_Telefone         AS melhor_tel,
+       r1.score_telefone          AS score_tel_1,
+       r2.score_telefone          AS score_tel_2,
+       r1.score_telefone - r2.score_telefone AS diferenca
+FROM ranking r1
+JOIN ranking r2
+    ON r1.Cliente_id = r2.Cliente_id
+   AND r1.rank_telefone_cliente = 1
+   AND r2.rank_telefone_cliente = 2
+WHERE r1.score_telefone - r2.score_telefone > 0.30
+ORDER BY diferenca DESC;
+```
+
+### 18.3 Integração com HSM Prestamista
 
 1. Query de score gera probabilidade de contato por (Cliente, Telefone)
-2. Score de contato + Score de propensão (produto) = Score combinado
-3. Score combinado prioriza envio de HSM WhatsApp
+2. `melhor_telefone_cliente = 1` seleciona o número prioritário por cliente
+3. Score de contato + Score de propensão (produto) = Score combinado
+4. Score combinado prioriza envio de HSM WhatsApp
 
-### 17.3 KPIs de Acompanhamento
+### 18.4 KPIs de Acompanhamento
 
-| KPI                     | Fórmula                                    | Meta     |
-| ----------------------- | ------------------------------------------ | -------- |
-| Hit rate classe A       | % contatos efetivos em score ≥ 80          | > 40%    |
-| Hit rate classe E       | % contatos efetivos em score < 20          | < 8%     |
-| Lift A/E                | Hit rate classe A / Hit rate classe E       | > 5×     |
-| Redução tentativas      | Tentativas atuais / Tentativas pré-modelo  | > 25%    |
+| KPI                       | Fórmula                                             | Meta     |
+| ------------------------- | --------------------------------------------------- | -------- |
+| Hit rate classe A         | % contatos efetivos em score ≥ 80                   | > 40%    |
+| Hit rate classe E         | % contatos efetivos em score < 20                   | < 8%     |
+| Lift A/E                  | Hit rate classe A / Hit rate classe E               | > 5×     |
+| Redução tentativas        | Tentativas atuais / Tentativas pré-modelo           | > 25%    |
+| Acerto do melhor telefone | % de CPCs obtidos no rank_telefone_cliente = 1      | > 60%    |
 
 ---
 
-## 18. Dependências Técnicas
+## 19. Dependências Técnicas
 
-### 18.1 Infraestrutura
+### 19.1 Infraestrutura
 
 | Componente       | Tecnologia                | Versão mínima |
 | ---------------- | ------------------------- | ------------- |
@@ -1221,57 +1209,61 @@ O modelo complementa o processo HSM via `MTE_RESUMO`:
 | Linguagem        | Python                    | 3.8+          |
 | Libs Python      | pandas, pyodbc, sqlalchemy| pandas ≥ 1.3  |
 
-### 18.2 Tabelas e Campos
+### 19.2 Tabelas e Campos
 
-| Tabela              | Campos utilizados                                                                   |
-| ------------------- | ----------------------------------------------------------------------------------- |
+| Tabela              | Campos utilizados                                                                                                          |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `ligacao`           | Ligacao_Cod, Cliente_id, Numero_Telefone, Dt_Ligacao, Conectado, Duracao_Conectado, Tipo_Processo_id, Campanha_id, Mailing_id |
-| `configuracao_aux`  | tlv_registro_id, campo_aux_id                                                       |
+| `configuracao_aux`  | tlv_registro_id, campo_aux_id                                                                                              |
 
-### 18.3 Configurações Fixas
+### 19.3 Configurações Fixas
 
 | Parâmetro      | Valor      | Descrição                                |
 | -------------- | ---------- | ---------------------------------------- |
 | `campo_aux_id` | 2126       | Identificador de CPC na configuracao_aux |
-| Filtro de data | 2026-02-10 | Data de corte para histórico             |
+| Filtro de data | 2026-01-01 | Data de corte para histórico             |
 
 ---
 
-## 19. Limitações Conhecidas
+## 20. Limitações Conhecidas
 
-### 19.1 Instabilidade com Baixo Volume
+### 20.1 Instabilidade com Baixo Volume
 
 Pares com < 5 tentativas produzem taxas instáveis. Uma ligação atendida pode gerar `answer_rate_tel = 1.0`.
 
 **Mitigação sugerida:** Suavização bayesiana ou Wilson score interval.
 
-### 19.2 Ausência de Horário
+### 20.2 Ausência de Horário
 
 O modelo não considera horário de ligação.
 
-### 19.3 CPC Dependente de Configuração
+### 20.3 CPC Dependente de Configuração
 
 A classificação CPC depende do `campo_aux_id = 2126`. Alterações nessa configuração afetam o modelo sem retroatividade.
 
-### 19.4 Janela Temporal Fixa
+### 20.4 Janela Temporal Fixa
 
-O filtro `WHERE Dt_Ligacao >= '2026-02-10'` é hard-coded. Recomenda-se parametrizar.
+O filtro `WHERE Dt_Ligacao >= '2026-01-01'` é hard-coded. Recomenda-se parametrizar.
 
-### 19.5 Pesos por Expertise
+### 20.5 Pesos por Expertise
 
 Os pesos (70/30 telefone/cliente e sub-pesos 60/20/20) foram definidos por expertise de negócio, não por otimização estatística.
 
-### 19.6 Métricas Informativas
+### 20.6 Métricas Informativas Fora do Score
 
 `cpc_rate_tel`, `avg_duracao_conectado_tel`, `answered_30d_tel`, `distinct_campaigns`, `distinct_mailings`, `answered_30d_cli` são calculadas mas **não participam do score**. Estão disponíveis para análise e futuras evoluções.
 
-### 19.7 Recência Telefone vs Recência Cliente
+### 20.7 Recência Duplicada em Clientes com 1 Telefone
 
 Quando o cliente possui apenas 1 telefone, `dias_desde_ultima_tel` = `dias_desde_ultima_cli`, fazendo com que o componente de recência contribua de forma duplicada (14% + 6% = 20% efetivo). Em clientes com múltiplos telefones, os valores podem divergir, capturando efeitos diferentes.
 
+### 20.8 Empate no Ranking de Telefone
+
+`ROW_NUMBER()` atribui posições únicas mesmo em empate. Em casos extremamente raros onde todos os 5 critérios de desempate são idênticos, a posição é determinística mas não interpretável como diferença real de qualidade.
+
 ---
 
-## 20. Evoluções Futuras
+## 21. Evoluções Futuras
 
 | #  | Evolução                                | Impacto esperado       | Complexidade |
 | -- | --------------------------------------- | ---------------------- | ------------ |
@@ -1285,32 +1277,40 @@ Quando o cliente possui apenas 1 telefone, `dias_desde_ultima_tel` = `dias_desde
 | 8  | Decaimento temporal de evidência        | Dados antigos pesam menos| Média      |
 | 9  | A/B test com grupo controle             | Validação do impacto   | Média        |
 | 10 | Parametrização da janela temporal       | Flexibilidade          | Baixa        |
+| 11 | KPI de acerto do melhor telefone        | Validação do ranking   | Baixa        |
 
 ---
 
-## 21. Changelog
+## 22. Changelog
 
-| Data       | Versão | Alteração                                                              |
-| ---------- | ------ | ---------------------------------------------------------------------- |
-| 2026-02-26 | 3.1    | **Inclusão do fator recência no score_cliente**                        |
-| 2026-02-26 | 3.1    | Score Cliente agora: 60% answer_rate + 20% recência + 20% (1-fadiga)  |
-| 2026-02-26 | 3.1    | Faixas de recência_cli idênticas às do telefone (≥60/≥30/≥14/<14)     |
-| 2026-02-26 | 3.1    | Pesos efetivos: answer_rate_cli 21%→18%, fadiga_cli 9%→6%, recência_cli +6% |
-| 2026-02-26 | 3.1    | Arquitetura agora simétrica: ambas as camadas com 60/20/20             |
-| 2026-02-26 | 3.1    | Adicionado Exemplo 5 (impacto isolado recência_cli)                    |
-| 2026-02-26 | 3.1    | Adicionada limitação 19.7 (recência duplicada em clientes 1 tel.)      |
-| 2026-02-24 | 3.0    | Query reestruturada com CTEs + camada cliente — alinhada com doc       |
-| 2026-02-24 | 3.0    | Score: 70% Telefone + 30% Cliente (conforme documentação)              |
-| 2026-02-24 | 3.0    | Score Telefone: 60% answer_rate + 20% recência + 20% (1-fadiga)       |
-| 2026-02-24 | 3.0    | Score Cliente (v3.0): 70% answer_rate_cli + 30% (1-fadiga_cli)        |
-| 2026-02-24 | 3.0    | Faixas de recência refinadas (4 degraus em vez de 3)                   |
-| 2026-02-24 | 3.0    | Faixas de fadiga refinadas (4 degraus em vez de 3)                     |
-| 2026-02-24 | 3.0    | Adicionada classificação automática A/B/C/D/E na query                 |
-| 2026-02-24 | 3.0    | Thresholds de fadiga cliente (4/8/12) separados dos telefone (2/4/6)   |
-| 2026-02-24 | 2.0    | Documentação v2 com base na query original                             |
-| 2026-02-24 | 1.0    | Documentação inicial                                                   |
+| Data       | Versão | Alteração                                                                          |
+| ---------- | ------ | ---------------------------------------------------------------------------------- |
+| 2026-03-10 | 3.2    | **Inclusão de `rank_telefone_cliente` e `melhor_telefone_cliente`**                |
+| 2026-03-10 | 3.2    | CTE `scores_calculados` extraído do SELECT final para permitir o ranking           |
+| 2026-03-10 | 3.2    | Novo CTE `ranking` com `ROW_NUMBER() OVER (PARTITION BY Cliente_id)`               |
+| 2026-03-10 | 3.2    | Ranking ordenado exclusivamente por `score_telefone` (não `score_final`)           |
+| 2026-03-10 | 3.2    | 5 critérios de desempate em cascata: score_tel → answer_rate → attempts_30d → recência → volume |
+| 2026-03-10 | 3.2    | Justificativa formal: score_cliente é constante por cliente, logo ranking por score_final ≡ score_telefone |
+| 2026-03-10 | 3.2    | Adicionada Seção 11 (Ranking de Melhor Telefone)                                   |
+| 2026-03-10 | 3.2    | Adicionado Exemplo 4 (mesmo cliente, dois telefones — ranking aplicado)            |
+| 2026-03-10 | 3.2    | Adicionada limitação 20.8 (empate no ranking)                                      |
+| 2026-03-10 | 3.2    | Adicionado KPI de acerto do melhor telefone (seção 18.4)                           |
+| 2026-03-10 | 3.2    | Atualizado filtro de data: 2026-02-10 → 2026-01-01                                |
+| 2026-03-10 | 3.2    | Arquitetura expandida de 3 para 4 CTEs                                             |
+| 2026-02-26 | 3.1    | Inclusão do fator recência no score_cliente                                        |
+| 2026-02-26 | 3.1    | Score Cliente: 60% answer_rate + 20% recência + 20% (1-fadiga)                    |
+| 2026-02-26 | 3.1    | Faixas de recência_cli idênticas às do telefone (≥60/≥30/≥14/<14)                 |
+| 2026-02-26 | 3.1    | Pesos efetivos: answer_rate_cli 21%→18%, fadiga_cli 9%→6%, recência_cli +6%       |
+| 2026-02-26 | 3.1    | Arquitetura agora simétrica: ambas as camadas com 60/20/20                         |
+| 2026-02-24 | 3.0    | Query reestruturada com CTEs + camada cliente                                      |
+| 2026-02-24 | 3.0    | Score: 70% Telefone + 30% Cliente                                                  |
+| 2026-02-24 | 3.0    | Score Telefone: 60% answer_rate + 20% recência + 20% (1-fadiga)                   |
+| 2026-02-24 | 3.0    | Score Cliente (v3.0): 70% answer_rate_cli + 30% (1-fadiga_cli)                    |
+| 2026-02-24 | 3.0    | Adicionada classificação automática A/B/C/D/E na query                             |
+| 2026-02-24 | 2.0    | Documentação v2                                                                    |
+| 2026-02-24 | 1.0    | Documentação inicial                                                               |
 
 ---
 
-> **Resumo da evolução v3.0 → v3.1:**  
-> A v3.0 usava no score_cliente apenas 2 componentes: `70% answer_rate_cli + 30% (1-fadiga_cli)`. A v3.1 adiciona o **fator de recência global do cliente** e redistribui os pesos para `60% answer_rate_cli + 20% recência_cli + 20% (1-fadiga_cli)`, tornando a arquitetura **simétrica** entre as camadas telefone e cliente. Isso permite que clientes "descansados" (sem contato há mais tempo) recebam um bônus na probabilidade de atendimento, capturando o efeito de que a disposição em atender melhora com o tempo sem acionamento.
+> **Resumo da evolução v3.1 → v3.2:**  
+> A v3.1 consolidou a arquitetura simétrica de dois níveis. A v3.2 adiciona o **índice de melhor telefone por cliente** via dois novos campos: `rank_telefone_cliente` (posição ordinal) e `melhor_telefone_cliente` (flag binária). O ranking é calculado **exclusivamente por `score_telefone`**, não por `score_final`, pois o `score_cliente` é idêntico para todos os telefones de um mesmo cliente e portanto não discrimina qual número é melhor — apenas o score do telefone carrega informação diferencial dentro do cliente. Isso torna o modelo operacionalmente completo: além de pontuar a probabilidade de contato, ele indica diretamente qual número discar primeiro.
