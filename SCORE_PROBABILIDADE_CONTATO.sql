@@ -393,8 +393,9 @@ ranking AS (
 -- SELECT FINAL
 -- =====================================================================
 SELECT
-    Cliente_id,
-    Numero_Telefone,
+    r.Cliente_id,
+    c.Cliente_Cod,
+    r.Numero_Telefone,
 
     -- =================================================================
     -- ÍNDICE DE MELHOR TELEFONE                          ← NOVO v3.2
@@ -442,7 +443,9 @@ SELECT
     score_final,
     classificacao_score
 
-FROM ranking
+FROM ranking r
+LEFT JOIN cliente c
+    ON r.Cliente_id = c.Cliente_id
 
 ORDER BY score_final DESC;
 
